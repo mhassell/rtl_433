@@ -197,6 +197,7 @@ void r_init_cfg(r_cfg_t *cfg)
 
     list_ensure_size(&cfg->demod->r_devs, 100);
     list_ensure_size(&cfg->demod->dumper, 32);
+    cfg->use_zmq = false;
 }
 
 r_cfg_t *r_create_cfg(void)

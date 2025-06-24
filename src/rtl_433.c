@@ -54,6 +54,7 @@
 #include "fatal.h"
 #include "write_sigrok.h"
 #include "mongoose.h"
+#include "zmq_interface.h"
 
 #ifdef _WIN32
 #include <io.h>
@@ -796,7 +797,7 @@ static int hasopt(int test, int argc, char *argv[], char const *optstring)
 
 static void parse_conf_option(r_cfg_t *cfg, int opt, char *arg);
 
-#define OPTSTRING "hVvqD:c:x:z:p:a:AI:S:m:M:r:w:W:l:d:t:f:H:g:s:b:n:R:X:F:K:C:T:UGy:E:Y:"
+#define OPTSTRING "hVvqD:c:x:z:p:a:AI:S:m:M:r:w:W:l:d:t:f:H:g:s:b:n:R:X:F:K:C:T:UGy:E:Y:Z:"
 
 // these should match the short options exactly
 static struct conf_keywords const conf_keywords[] = {
@@ -835,6 +836,7 @@ static struct conf_keywords const conf_keywords[] = {
         {"duration", 'T'},
         {"test_data", 'y'},
         {"stop_after_successful_events", 'E'},
+        {"zmq_port", 'Z'},
         {NULL, 0}};
 
 static void parse_conf_text(r_cfg_t *cfg, char *conf)
@@ -865,7 +867,7 @@ static void parse_conf_try_default_files(r_cfg_t *cfg)
 {
     char **paths = compat_get_default_conf_paths();
     for (int a = 0; paths[a]; a++) {
-        // fprintf(stderr, "Trying conf file at \"%s\"...\n", paths[a]);
+        fprintf(stderr, "Trying conf file at \"%s\"...\n", paths[a]);
         if (hasconf(paths[a])) {
             fprintf(stderr, "Reading conf from \"%s\".\n", paths[a]);
             parse_conf_file(cfg, paths[a]);
@@ -1320,6 +1322,12 @@ static void parse_conf_option(r_cfg_t *cfg, int opt, char *arg)
             cfg->after_successful_events_flag = atobv(arg, 1);
         }
         break;
+    case 'Z':
+        fprintf(stdout, "Using ZMQ connection %s\n", arg);
+        zmq_config zmq_info = {.address = arg, .tcp = "", .port = -1}; 
+        cfg->zmq_info = &zmq_info;
+        cfg->use_zmq = true;
+        break; 
     default:
         usage(1);
         break;

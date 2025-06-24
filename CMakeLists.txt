@@ -10,7 +10,7 @@ endif()
 if(POLICY CMP0054)
     cmake_policy(SET CMP0054 NEW)
 endif()
-
+set(CMAKE_BUILD_TYPE "Debug")
 project(rtl433 C)
 
 #select the release build type by default to get optimization flags

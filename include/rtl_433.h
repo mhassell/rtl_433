@@ -9,6 +9,7 @@
 #include "list.h"
 #include <time.h>
 #include <signal.h>
+#include <stdbool.h> 
 
 #define DEFAULT_SAMPLE_RATE     250000
 #define DEFAULT_FREQUENCY       433920000
@@ -56,6 +57,12 @@ typedef enum {
     DEVICE_STATE_GRACE,
     DEVICE_STATE_STARTED,
 } device_state_t;
+
+typedef struct z_cfg {
+    char* address;    // tcp://127.0.0.1:9001
+    char* tcp;        // tcp://127.0.0.1
+    int   port;       // 9001
+} zmq_config;
 
 typedef struct r_cfg {
     device_mode_t dev_mode; ///< Input device run mode
@@ -130,7 +137,9 @@ typedef struct r_cfg {
     unsigned frames_ook;    ///< counter of ook demods for report interval statistic
     unsigned frames_fsk;    ///< counter of fsk demods for report interval statistic
     unsigned frames_events; ///< counter of decoder events for report interval statistic
-    struct mg_mgr *mgr;
+    struct mg_mgr *mgr;     ///< mongoose manager
+    zmq_config *zmq_info;        ///< info for a zmq connection
+    bool use_zmq;
 } r_cfg_t;
 
 #endif /* INCLUDE_RTL_433_H_ */
