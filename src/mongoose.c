@@ -1,4 +1,7 @@
 #include "mongoose.h"
+#include "zmq_interface.h"
+#include "rtl_433.h"
+
 /* MSG_NOSIGNAL is Linux and most BSDs only, not macOS or Windows */
 #ifndef MSG_NOSIGNAL
 #define MSG_NOSIGNAL 0
@@ -4171,6 +4174,37 @@ static void mg_mgr_handle_ctl_sock(struct mg_mgr *mgr) {
 }
 #endif
 
+void mg_mgr_handle_zmq_sock(struct mg_mgr *mgr){
+  struct ctl_msg ctl_msg;
+  r_cfg_t *cfg = mgr->active_connections->user_data;
+
+  if (!cfg->zmq_enabled)
+  {
+    /*
+    void *context = zmq_ctx_new();
+    cfg->zmq_info->context = malloc(sizeof(context));
+    memcpy(cfg->zmq_info->context, context, sizeof(context));
+    void *requester = zmq_socket(context, ZMQ_SUB);
+    cfg->zmq_info->requester = malloc(sizeof(requester));
+    memcpy(cfg->zmq_info->requester, requester, sizeof(requester));
+    zmq_connect (cfg->zmq_info->requester, "tcp://127.0.0.1:9001");
+    int rc = zmq_setsockopt(cfg->zmq_info->requester, ZMQ_SUBSCRIBE, "", 0);
+    cfg->zmq_enabled = true;
+    */
+    cfg->zmq_info->context = zmq_ctx_new(); 
+    cfg->zmq_info->requester = zmq_socket(cfg->zmq_info->context, ZMQ_SUB);
+    zmq_connect (cfg->zmq_info->requester, "tcp://127.0.0.1:9001");
+    int rc = zmq_setsockopt(cfg->zmq_info->requester, ZMQ_SUBSCRIBE, "", 0);
+    cfg->zmq_enabled = true;
+
+  }
+
+  char buffer [1800000];
+  zmq_recv (cfg->zmq_info->requester, buffer, 1800000, 0);
+  //printf("data: %c", buffer[1799999]);
+
+}
+
 /* Associate a socket to a connection. */
 void mg_socket_if_sock_set(struct mg_connection *nc, sock_t sock) {
   mg_set_non_blocking_mode(sock);
@@ -4311,6 +4345,11 @@ time_t mg_socket_if_poll(struct mg_iface *iface, int timeout_ms) {
     mg_mgr_handle_ctl_sock(mgr);
   }
 #endif
+
+  // hack
+  r_cfg_t *cfg = mgr->active_connections->user_data;
+  if (cfg->use_zmq)
+    mg_mgr_handle_zmq_sock(mgr);
 
   for (nc = mgr->active_connections; nc != NULL; nc = tmp) {
     int fd_flags = 0;

@@ -1324,9 +1324,17 @@ static void parse_conf_option(r_cfg_t *cfg, int opt, char *arg)
         break;
     case 'Z':
         fprintf(stdout, "Using ZMQ connection %s\n", arg);
-        zmq_config zmq_info = {.address = arg, .tcp = "", .port = -1}; 
-        cfg->zmq_info = &zmq_info;
+        size_t len_address = strlen(arg);
+        char * address = malloc(len_address*sizeof(char));
+        memcpy(address, arg, len_address);
+        zmq_config *zmq_info;
+        zmq_info = malloc(sizeof(zmq_config));
+        zmq_info->address = address;
+        zmq_info->tcp = "";
+        zmq_info->port = -1;
+        cfg->zmq_info = zmq_info;
         cfg->use_zmq = true;
+        cfg->dev_mode = DEVICE_MODE_MANUAL;
         break; 
     default:
         usage(1);

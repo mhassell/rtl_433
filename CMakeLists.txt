@@ -93,7 +93,9 @@ if(("${CMAKE_C_COMPILER_ID}" STREQUAL "GNU" OR "${CMAKE_C_COMPILER_ID}" MATCHES 
     # CMake Debug default for GCC/Clang is "-g -DNDEBUG"
     # set(CMAKE_C_FLAGS_DEBUG -g3 -O0)
     # make use of ASAN
-    set(CMAKE_C_FLAGS_DEBUG "-ggdb -fsanitize=undefined -fsanitize=address -fno-omit-frame-pointer")
+    # set(CMAKE_C_FLAGS_DEBUG "-ggdb -fsanitize=undefined -fsanitize=address -fno-omit-frame-pointer")
+    set(CMAKE_C_FLAGS_DEBUG "-ggdb -fno-omit-frame-pointer")
+
 endif()
 if("${CMAKE_C_COMPILER_ID}" MATCHES "Clang")
     # make sure we don't accidentally copy more than an int
@@ -186,6 +188,30 @@ else()
     message(STATUS "Threads support disabled.")
 endif()
 
+########################################################################
+# Find CZMQ
+########################################################################
+#find_library(ZeroMQ czmq 
+#            PATHS /usr/local/lib REQUIRED)
+#find_library(ZeroMQ czmq)
+
+#find_library(zmq_location NAMES libzmq.a)
+#message(STATUS ${zmq_location})
+
+#add_library(zmq STATIC IMPORTED)
+#set_target_properties(zmq PROPERTIES IMPORTED_LOCATION ${zmq_location})
+
+find_library(ZeroMQ czmq PATHS /usr/local/lib REQUIRED NO_DEFAULT_PATH)
+message(STATUS ${ZeroMQ})
+
+#add_library(zmq STATIC IMPORTED)
+
+if(ZeroMQ)
+    message("YES-----------------------------------")
+    message("HERE" ${ZeroMQ})
+else()
+    message("NO------------------------------------")
+endif()
 ########################################################################
 # Find OpenSSL build dependencies
 ########################################################################

@@ -62,6 +62,9 @@ typedef struct z_cfg {
     char* address;    // tcp://127.0.0.1:9001
     char* tcp;        // tcp://127.0.0.1
     int   port;       // 9001
+    void *context;    // zmq_ctx_new
+    void *requester;  // zmq_socket
+    
 } zmq_config;
 
 typedef struct r_cfg {
@@ -140,6 +143,7 @@ typedef struct r_cfg {
     struct mg_mgr *mgr;     ///< mongoose manager
     zmq_config *zmq_info;        ///< info for a zmq connection
     bool use_zmq;
+    bool zmq_enabled;       ///< did we set up zmq socket yet?
 } r_cfg_t;
 
 #endif /* INCLUDE_RTL_433_H_ */

@@ -305,6 +305,7 @@ endif()
 if(CMAKE_THREAD_LIBS_INIT)
     target_link_libraries(rtl_433 "${CMAKE_THREAD_LIBS_INIT}")
 endif()
+target_link_libraries(rtl_433 czmq zmq)
 
 if(MSVC)
     # needs CMake 3.1 but Windows builds should have that
