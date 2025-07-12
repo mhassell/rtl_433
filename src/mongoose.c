@@ -2,6 +2,7 @@
 #include "zmq_interface.h"
 #include "rtl_433.h"
 
+
 /* MSG_NOSIGNAL is Linux and most BSDs only, not macOS or Windows */
 #ifndef MSG_NOSIGNAL
 #define MSG_NOSIGNAL 0
@@ -4180,17 +4181,6 @@ void mg_mgr_handle_zmq_sock(struct mg_mgr *mgr){
 
   if (!cfg->zmq_enabled)
   {
-    /*
-    void *context = zmq_ctx_new();
-    cfg->zmq_info->context = malloc(sizeof(context));
-    memcpy(cfg->zmq_info->context, context, sizeof(context));
-    void *requester = zmq_socket(context, ZMQ_SUB);
-    cfg->zmq_info->requester = malloc(sizeof(requester));
-    memcpy(cfg->zmq_info->requester, requester, sizeof(requester));
-    zmq_connect (cfg->zmq_info->requester, "tcp://127.0.0.1:9001");
-    int rc = zmq_setsockopt(cfg->zmq_info->requester, ZMQ_SUBSCRIBE, "", 0);
-    cfg->zmq_enabled = true;
-    */
     cfg->zmq_info->context = zmq_ctx_new(); 
     cfg->zmq_info->requester = zmq_socket(cfg->zmq_info->context, ZMQ_SUB);
     zmq_connect (cfg->zmq_info->requester, "tcp://127.0.0.1:9001");
@@ -4199,9 +4189,17 @@ void mg_mgr_handle_zmq_sock(struct mg_mgr *mgr){
 
   }
 
+  struct mg_connection *nc;
+
+
   char buffer [1800000];
-  zmq_recv (cfg->zmq_info->requester, buffer, 1800000, 0);
-  //printf("data: %c", buffer[1799999]);
+  zmq_recv(cfg->zmq_info->requester, buffer, 1800000, 0);
+
+  // ctl_msg.callback(nc, 0, &buffer);
+
+  // sdr_handler(nc, 0, &buffer);
+
+  // mg_broadcast(mgr, sdr_handler, (void *)ev, sizeof(*ev));
 
 }
 

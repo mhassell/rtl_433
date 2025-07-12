@@ -1617,6 +1617,16 @@ static void timer_handler(struct mg_connection *nc, int ev, void *ev_data)
     }
 }
 
+void zmq_setup(r_cfg_t *cfg)
+{
+    if (!cfg->use_zmq)
+    {
+        return;
+    }
+    
+     
+}
+
 int main(int argc, char **argv) {
     int r = 0;
     struct dm_state *demod;
@@ -2059,6 +2069,11 @@ int main(int argc, char **argv) {
         if (r < 0) {
             exit(2);
         }
+    }
+
+    if (cfg->use_zmq)
+    {
+       zmq_setup(cfg); 
     }
 
     if (cfg->duration > 0) {
