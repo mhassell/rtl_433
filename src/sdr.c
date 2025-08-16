@@ -404,7 +404,7 @@ static int sdr_open_rtl(sdr_dev_t **out_dev, char const *dev_query, int verbose)
 
     for (uint32_t i = dev_query ? dev_index : 0;
             //cast quiets -Wsign-compare; if dev_index were < 0, would have returned -1 above
-            i < (dev_query ? (unsigned)dev_index + 1 : device_count);
+           i < (dev_query ? (unsigned)dev_index + 1 : device_count);
             i++) {
         rtlsdr_get_device_usb_strings(i, vendor, product, serial);
 
@@ -1734,6 +1734,35 @@ static THREAD_RETURN THREAD_CALL acquire_thread(void *arg)
 
     print_log(LOG_DEBUG, __func__, "acquire_thread done...");
     return (THREAD_RETURN)(intptr_t)r;
+}
+
+int zmq_start(sdr_dev_t *dev, sdr_event_cb_t async_cb, void *async_ctx, uint32_t buf_num, uint32_t buf_len) 
+{
+
+    dev = malloc(sizeof(sdr_dev_t));
+    dev->async_cb = malloc(sizeof(async_cb));
+    dev->async_cb = async_cb;
+    dev->async_ctx = malloc(sizeof(async_ctx));
+    dev->async_ctx = async_ctx;
+    dev->buf_num = buf_num;
+    dev->buf_len = buf_len;
+
+#ifndef _WIN32
+    // Block all signals from the worker thread
+    sigset_t sigset;
+    sigset_t oldset;
+    sigfillset(&sigset);
+    pthread_sigmask(SIG_SETMASK, &sigset, &oldset);
+#endif
+    int r = pthread_create(&dev->thread, NULL, acquire_thread, dev);
+#ifndef _WIN32
+    pthread_sigmask(SIG_SETMASK, &oldset, NULL);
+#endif
+    if (r) {
+        fprintf(stderr, "%s: error in pthread_create, rc: %d\n", __func__, r);
+    }
+    return r;
+
 }
 
 int sdr_start(sdr_dev_t *dev, sdr_event_cb_t async_cb, void *async_ctx, uint32_t buf_num, uint32_t buf_len)

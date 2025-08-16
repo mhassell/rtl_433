@@ -1497,17 +1497,21 @@ static int start_sdr(r_cfg_t *cfg)
             print_logf(LOG_ERROR, "Input", "Closing SDR failed (%d)", r);
         }
     }
-    r = sdr_open(&cfg->dev, cfg->dev_query, cfg->verbosity);
-    if (r < 0) {
-        return -1; // exit(2);
+
+    if(!cfg->use_zmq) {
+        r = sdr_open(&cfg->dev, cfg->dev_query, cfg->verbosity);
+        if (r < 0) {
+            return -1; // exit(2);
+        }
     }
-    cfg->dev_info = sdr_get_dev_info(cfg->dev);
-    cfg->demod->sample_size = sdr_get_sample_size(cfg->dev);
+
+    if(!cfg->use_zmq) {
+        cfg->dev_info = sdr_get_dev_info(cfg->dev);
+        cfg->demod->sample_size = sdr_get_sample_size(cfg->dev);
     // cfg->demod->sample_signed = sdr_get_sample_signed(cfg->dev);
-
     /* Set the sample rate */
-    sdr_set_sample_rate(cfg->dev, cfg->samp_rate, 1); // always verbose
-
+        sdr_set_sample_rate(cfg->dev, cfg->samp_rate, 1); // always verbose
+    }
     if (cfg->verbosity || cfg->demod->level_limit < 0.0)
         print_logf(LOG_NOTICE, "Input", "Bit detection level set to %.1f%s.", cfg->demod->level_limit, (cfg->demod->level_limit < 0.0 ? "" : " (Auto)"));
 
@@ -1521,26 +1525,35 @@ static int start_sdr(r_cfg_t *cfg)
     }
 
     /* Reset endpoint before we start reading from it (mandatory) */
-    r = sdr_reset(cfg->dev, cfg->verbosity);
-    if (r < 0) {
-        print_log(LOG_ERROR, "Input", "Failed to reset buffers.");
+    if(!cfg->use_zmq) {
+        r = sdr_reset(cfg->dev, cfg->verbosity);
+        if (r < 0) {
+            print_log(LOG_ERROR, "Input", "Failed to reset buffers.");
+        }
+        sdr_activate(cfg->dev);
+
+        if (cfg->verbosity) {
+            print_log(LOG_NOTICE, "Input", "Reading samples in async mode...");
+        }
+
+        sdr_set_center_freq(cfg->dev, cfg->center_frequency, 1); // always verbose
+
+        r = sdr_start(cfg->dev, acquire_callback, (void *)get_mgr(cfg),
+                DEFAULT_ASYNC_BUF_NUMBER, cfg->out_block_size);
+        if (r < 0) {
+            print_logf(LOG_ERROR, "Input", "async start failed (%d).", r);
+        }
+
+        cfg->dev_state = DEVICE_STATE_STARTING;
+        return r;
     }
-    sdr_activate(cfg->dev);
-
-    if (cfg->verbosity) {
-        print_log(LOG_NOTICE, "Input", "Reading samples in async mode...");
-    }
-
-    sdr_set_center_freq(cfg->dev, cfg->center_frequency, 1); // always verbose
-
-    r = sdr_start(cfg->dev, acquire_callback, (void *)get_mgr(cfg),
+    else {
+        // start with zmq
+       r = zmq_start(cfg->dev, acquire_callback, (void *)get_mgr(cfg),
             DEFAULT_ASYNC_BUF_NUMBER, cfg->out_block_size);
-    if (r < 0) {
-        print_logf(LOG_ERROR, "Input", "async start failed (%d).", r);
+       return r;
     }
 
-    cfg->dev_state = DEVICE_STATE_STARTING;
-    return r;
 }
 
 static void timer_handler(struct mg_connection *nc, int ev, void *ev_data)
@@ -1615,16 +1628,6 @@ static void timer_handler(struct mg_connection *nc, int ev, void *ev_data)
         break;
     }
     }
-}
-
-void zmq_setup(r_cfg_t *cfg)
-{
-    if (!cfg->use_zmq)
-    {
-        return;
-    }
-    
-     
 }
 
 int main(int argc, char **argv) {
@@ -2069,11 +2072,6 @@ int main(int argc, char **argv) {
         if (r < 0) {
             exit(2);
         }
-    }
-
-    if (cfg->use_zmq)
-    {
-       zmq_setup(cfg); 
     }
 
     if (cfg->duration > 0) {

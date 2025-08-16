@@ -207,10 +207,9 @@ message(STATUS ${ZeroMQ})
 #add_library(zmq STATIC IMPORTED)
 
 if(ZeroMQ)
-    message("YES-----------------------------------")
-    message("HERE" ${ZeroMQ})
+    message("Found zmq libraries:" ${ZeroMQ})
 else()
-    message("NO------------------------------------")
+    message("Failed to find zmq libraries")
 endif()
 ########################################################################
 # Find OpenSSL build dependencies
