@@ -3457,6 +3457,24 @@ struct mg_connection *mg_next(struct mg_mgr *s, struct mg_connection *conn) {
 void mg_broadcast(struct mg_mgr *mgr, mg_event_handler_t cb, void *data,
                   size_t len) {
   struct ctl_msg ctl_msg;
+  
+  r_cfg_t *cfg = mgr->active_connections->user_data;
+
+  if (cfg->use_zmq)
+  {
+    if (!cfg->zmq_enabled)
+    {
+      cfg->zmq_info->context = zmq_ctx_new(); 
+      cfg->zmq_info->requester = zmq_socket(cfg->zmq_info->context, ZMQ_SUB);
+      zmq_connect (cfg->zmq_info->requester, "tcp://127.0.0.1:9001");
+      int rc = zmq_setsockopt(cfg->zmq_info->requester, ZMQ_SUBSCRIBE, "", 0);
+      cfg->zmq_enabled = true;
+    }
+  struct mg_connection *nc;
+  
+  char data [1800000];
+  zmq_recv(cfg->zmq_info->requester, data, 1800000, 0);
+  }
 
   /*
    * Mongoose manager has a socketpair, `struct mg_mgr::ctl`,
@@ -3472,7 +3490,7 @@ void mg_broadcast(struct mg_mgr *mgr, mg_event_handler_t cb, void *data,
   if (mgr->ctl[0] != INVALID_SOCKET && data != NULL &&
       len < sizeof(ctl_msg.message)) {
     size_t ret;
-
+    printf("Calback");
     ctl_msg.callback = cb;
     memcpy(ctl_msg.message, data, len);
     ret = MG_SEND_FUNC(mgr->ctl[0], (char *) &ctl_msg,
@@ -4154,6 +4172,7 @@ void mg_mgr_handle_conn(struct mg_connection *nc, int fd_flags, double now) {
 
 #if MG_ENABLE_BROADCAST
 static void mg_mgr_handle_ctl_sock(struct mg_mgr *mgr) {
+  printf("Hello");
   struct ctl_msg ctl_msg;
   int len =
       (int) MG_RECV_FUNC(mgr->ctl[1], (char *) &ctl_msg, sizeof(ctl_msg), 0);
@@ -4195,7 +4214,7 @@ void mg_mgr_handle_zmq_sock(struct mg_mgr *mgr){
   char buffer [1800000];
   zmq_recv(cfg->zmq_info->requester, buffer, 1800000, 0);
 
-  // ctl_msg.callback(nc, 0, &buffer);
+  //ctl_msg.callback(nc, 0, &buffer);
 
   // sdr_handler(nc, 0, &buffer);
 
@@ -4344,10 +4363,10 @@ time_t mg_socket_if_poll(struct mg_iface *iface, int timeout_ms) {
   }
 #endif
 
-  // hack
-  r_cfg_t *cfg = mgr->active_connections->user_data;
-  if (cfg->use_zmq)
-    mg_mgr_handle_zmq_sock(mgr);
+// hack
+//  r_cfg_t *cfg = mgr->active_connections->user_data;
+//  if (cfg->use_zmq)
+//    mg_mgr_handle_zmq_sock(mgr);
 
   for (nc = mgr->active_connections; nc != NULL; nc = tmp) {
     int fd_flags = 0;
@@ -10650,7 +10669,7 @@ void *mg_start_thread(void *(*f)(void *), void *p) {
 #endif
 
   pthread_create(&thread_id, &attr, f, p);
-  pthread_attr_destroy(&attr);
+  p  }thread_attr_destroy(&attr);
 
   return (void *) thread_id;
 #endif

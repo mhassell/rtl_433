@@ -1645,6 +1645,9 @@ int sdr_reset(sdr_dev_t *dev, int verbose)
 
 int sdr_start_sync(sdr_dev_t *dev, sdr_event_cb_t cb, void *ctx, uint32_t buf_num, uint32_t buf_len)
 {
+
+    printf("Hello world\n");
+    
     if (!dev)
         return -1;
 
@@ -1736,6 +1739,31 @@ static THREAD_RETURN THREAD_CALL acquire_thread(void *arg)
     return (THREAD_RETURN)(intptr_t)r;
 }
 
+#ifdef THREADS
+static void THREAD_CALL acquire_zmq_thread(void *arg)
+{
+    sdr_dev_t *dev = arg;
+    printf("Hello, world!\n");
+    //print_log(LOG_DEBUG, __func__, "acquire_thread enter...");
+
+    //int r = sdr_start_sync(dev, dev->async_cb, dev->async_ctx, dev->buf_num, dev->buf_len);
+    // if (cfg->verbosity > 1)
+    //print_log(LOG_DEBUG, __func__, "acquire_thread async stop...");
+
+    //if (r < 0) {
+    //    print_logf(LOG_ERROR, "SDR", "async read failed (%d).", r);
+    //}
+
+//    sdr_event_t ev = {
+//            .ev  = SDR_EV_QUIT,
+//    };
+//    dev->async_cb(&ev, dev->async_ctx);
+
+    //print_log(LOG_DEBUG, __func__, "acquire_thread done...");
+    //return (THREAD_RETURN)(intptr_t)r;
+}
+#endif
+
 int zmq_start(sdr_dev_t *dev, sdr_event_cb_t async_cb, void *async_ctx, uint32_t buf_num, uint32_t buf_len) 
 {
 
@@ -1754,7 +1782,7 @@ int zmq_start(sdr_dev_t *dev, sdr_event_cb_t async_cb, void *async_ctx, uint32_t
     sigfillset(&sigset);
     pthread_sigmask(SIG_SETMASK, &sigset, &oldset);
 #endif
-    int r = pthread_create(&dev->thread, NULL, acquire_thread, dev);
+    int r = pthread_create(&dev->thread, NULL, acquire_zmq_thread, dev);
 #ifndef _WIN32
     pthread_sigmask(SIG_SETMASK, &oldset, NULL);
 #endif

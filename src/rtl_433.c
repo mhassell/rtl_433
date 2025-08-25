@@ -1334,7 +1334,7 @@ static void parse_conf_option(r_cfg_t *cfg, int opt, char *arg)
         zmq_info->port = -1;
         cfg->zmq_info = zmq_info;
         cfg->use_zmq = true;
-        cfg->dev_mode = DEVICE_MODE_MANUAL;
+        //cfg->dev_mode = DEVICE_MODE_MANUAL;
         break; 
     default:
         usage(1);
@@ -1487,6 +1487,27 @@ static void acquire_callback(sdr_event_t *ev, void *ctx)
     //fprintf(stderr, "acquire_callback bc done...\n");
 }
 
+// note that this function is called in a different thread
+static void acquire_zmq_callback(sdr_event_t *ev, void *ctx)
+{
+    //struct timeval now;
+    //get_time_now(&now);
+    //fprintf(stderr, "%ld.%06ld acquire_callback...\n", (long)now.tv_sec, (long)now.tv_usec);
+
+    struct mg_mgr *mgr = ctx;
+
+    printf("Here I am");
+
+    // TODO: We should run the demod here to unblock the event loop
+
+    // thread-safe dispatch, ev_data is the iq buffer pointer and length
+    // mg_mgr_poll() calls specified callback for each connection.
+    //fprintf(stderr, "acquire_callback bc send...\n");
+    // mg_broadcast(mgr, sdr_handler, (void *)ev, sizeof(*ev));
+
+    //fprintf(stderr, "acquire_callback bc done...\n");
+}
+
 static int start_sdr(r_cfg_t *cfg)
 {
     int r;
@@ -1548,9 +1569,14 @@ static int start_sdr(r_cfg_t *cfg)
         return r;
     }
     else {
-        // start with zmq
-       r = zmq_start(cfg->dev, acquire_callback, (void *)get_mgr(cfg),
+       // start with zmq
+       void *mgr = get_mgr(cfg);
+       r = zmq_start(cfg->dev, acquire_zmq_callback, mgr,
             DEFAULT_ASYNC_BUF_NUMBER, cfg->out_block_size);
+        if (r < 0) {
+            printf("borked");
+            print_logf(LOG_ERROR, "Input", "async start failed (%d).", r);
+        }
        return r;
     }
 
