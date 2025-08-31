@@ -42,6 +42,7 @@ add_library(r_433 STATIC
     samp_grab.c
     sdr.c
     term_ctl.c
+    zmq_interface.c
     write_sigrok.c
     devices/abmt.c
     devices/acurite.c
@@ -142,7 +143,6 @@ add_library(r_433 STATIC
     devices/hcs200.c
     devices/hideki.c
     devices/holman_ws5029.c
-    devices/homelead_hg9901.c
     devices/hondaremote.c
     devices/honeywell.c
     devices/honeywell_cm921.c
@@ -178,7 +178,6 @@ add_library(r_433 STATIC
     devices/maverick_et73.c
     devices/maverick_et73x.c
     devices/maverick_xr30.c
-    devices/maverick_xr50.c
     devices/mebus.c
     devices/megacode.c
     devices/missil_ml0757.c
@@ -249,7 +248,6 @@ add_library(r_433 STATIC
     devices/thermopro_tp82xb.c
     devices/thermopro_tx2.c
     devices/thermopro_tx2c.c
-    devices/thermopro_tx7b.c
     devices/thermor.c
     devices/tpms_abarth124.c
     devices/tpms_ave.c
@@ -307,6 +305,7 @@ endif()
 if(CMAKE_THREAD_LIBS_INIT)
     target_link_libraries(rtl_433 "${CMAKE_THREAD_LIBS_INIT}")
 endif()
+target_link_libraries(rtl_433 czmq zmq)
 
 if(MSVC)
     # needs CMake 3.1 but Windows builds should have that
@@ -335,3 +334,4 @@ set_target_properties(rtl_433 r_433 PROPERTIES C_STANDARD 99)
 install(TARGETS ${INSTALL_TARGETS}
     RUNTIME DESTINATION bin              # .dll file
 )
+    

@@ -54,6 +54,7 @@
 #include "fatal.h"
 #include "write_sigrok.h"
 #include "mongoose.h"
+#include "zmq_interface.h"
 
 #ifdef _WIN32
 #include <io.h>
@@ -816,7 +817,7 @@ static int hasopt(int test, int argc, char *argv[], char const *optstring)
 
 static void parse_conf_option(r_cfg_t *cfg, int opt, char *arg);
 
-#define OPTSTRING "hVvqD:c:x:z:p:a:AI:S:m:M:r:w:W:l:d:t:f:H:g:s:b:n:R:X:F:K:C:T:UGy:E:Y:"
+#define OPTSTRING "hVvqD:c:x:z:p:a:AI:S:m:M:r:w:W:l:d:t:f:H:g:s:b:n:R:X:F:K:C:T:UGy:E:Y:Z:"
 
 // these should match the short options exactly
 static struct conf_keywords const conf_keywords[] = {
@@ -855,6 +856,7 @@ static struct conf_keywords const conf_keywords[] = {
         {"duration", 'T'},
         {"test_data", 'y'},
         {"stop_after_successful_events", 'E'},
+        {"zmq_port", 'Z'},
         {NULL, 0}};
 
 static void parse_conf_text(r_cfg_t *cfg, char *conf)
@@ -1340,6 +1342,20 @@ static void parse_conf_option(r_cfg_t *cfg, int opt, char *arg)
             cfg->after_successful_events_flag = atobv(arg, 1);
         }
         break;
+    case 'Z':
+        fprintf(stdout, "Using ZMQ connection %s\n", arg);
+        size_t len_address = strlen(arg);
+        char * address = malloc(len_address*sizeof(char));
+        memcpy(address, arg, len_address);
+        zmq_config *zmq_info;
+        zmq_info = malloc(sizeof(zmq_config));
+        zmq_info->address = address;
+        zmq_info->tcp = "";
+        zmq_info->port = -1;
+        cfg->zmq_info = zmq_info;
+        cfg->use_zmq = true;
+        //cfg->dev_mode = DEVICE_MODE_MANUAL;
+        break; 
     default:
         usage(1);
         break;

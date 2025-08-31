@@ -197,6 +197,8 @@ void r_init_cfg(r_cfg_t *cfg)
 
     list_ensure_size(&cfg->demod->r_devs, 100);
     list_ensure_size(&cfg->demod->dumper, 32);
+    cfg->use_zmq = false;
+    cfg->zmq_enabled = false;
 }
 
 r_cfg_t *r_create_cfg(void)
@@ -256,7 +258,9 @@ void r_free_cfg(r_cfg_t *cfg)
     mg_mgr_free(cfg->mgr);
     free(cfg->mgr);
     cfg->mgr = NULL;
-
+ 
+    free(cfg->zmq_info->address);
+    free(cfg->zmq_info);
     //free(cfg);
 }
 
