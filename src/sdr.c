@@ -484,7 +484,7 @@ static int rtlsdr_find_tuner_gain(sdr_dev_t *dev, int centigain, int verbose)
 static void rtlsdr_read_cb(unsigned char *iq_buf, uint32_t len, void *ctx)
 {
     sdr_dev_t *dev = ctx;
-
+    printf("Hi\n");
     //fprintf(stderr, "rtlsdr_read_cb enter...\n");
 #ifdef THREADS
     pthread_mutex_lock(&dev->lock);
@@ -543,6 +543,8 @@ static int rtlsdr_read_loop(sdr_dev_t *dev, sdr_event_cb_t cb, void *ctx, uint32
     }
 
     int r = 0;
+
+    printf("Also Hi\n");
 
     dev->rtlsdr_cb = cb;
     dev->rtlsdr_cb_ctx = ctx;
@@ -1726,11 +1728,6 @@ static THREAD_RETURN THREAD_CALL acquire_thread(void *arg)
     if (r < 0) {
         print_logf(LOG_ERROR, "SDR", "async read failed (%d).", r);
     }
-
-//    sdr_event_t ev = {
-//            .ev  = SDR_EV_QUIT,
-//    };
-//    dev->async_cb(&ev, dev->async_ctx);
 
     print_log(LOG_DEBUG, __func__, "acquire_thread done...");
     return (THREAD_RETURN)(intptr_t)r;

@@ -4212,6 +4212,36 @@ void mg_add_to_set(sock_t sock, fd_set *set, sock_t *max_fd) {
   }
 }
 
+/*
+void mg_mgr_handle_zmq_sock(struct mg_mgr *mgr){
+  struct ctl_msg ctl_msg;
+  r_cfg_t *cfg = mgr->active_connections->user_data;
+
+  if (!cfg->zmq_enabled)
+  {
+    cfg->zmq_info->context = zmq_ctx_new(); 
+    cfg->zmq_info->requester = zmq_socket(cfg->zmq_info->context, ZMQ_SUB);
+    zmq_connect (cfg->zmq_info->requester, "tcp://127.0.0.1:9001");
+    int rc = zmq_setsockopt(cfg->zmq_info->requester, ZMQ_SUBSCRIBE, "", 0);
+    cfg->zmq_enabled = true;
+
+  }
+
+  struct mg_connection *nc;
+
+
+  char buffer [1800000];
+  zmq_recv(cfg->zmq_info->requester, buffer, 1800000, 0);
+
+  //ctl_msg.callback(nc, 0, &buffer);
+
+  // sdr_handler(nc, 0, &buffer);
+
+  // mg_broadcast(mgr, sdr_handler, (void *)ev, sizeof(*ev));
+
+}
+*/
+
 time_t mg_socket_if_poll(struct mg_iface *iface, int timeout_ms) {
   struct mg_mgr *mgr = iface->mgr;
   double now = mg_time();

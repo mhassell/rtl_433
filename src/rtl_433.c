@@ -54,7 +54,6 @@
 #include "fatal.h"
 #include "write_sigrok.h"
 #include "mongoose.h"
-#include "zmq_interface.h"
 
 #ifdef _WIN32
 #include <io.h>
@@ -421,6 +420,7 @@ static void reset_sdr_callback(r_cfg_t *cfg)
 static void sdr_callback(unsigned char *iq_buf, uint32_t len, void *ctx)
 {
     //fprintf(stderr, "sdr_callback... %u\n", len);
+    printf("PEN15\n");
     r_cfg_t *cfg = ctx;
     struct dm_state *demod = cfg->demod;
     char time_str[LOCAL_TIME_BUFLEN];
@@ -1354,7 +1354,7 @@ static void parse_conf_option(r_cfg_t *cfg, int opt, char *arg)
         zmq_info->port = -1;
         cfg->zmq_info = zmq_info;
         cfg->use_zmq = true;
-        //cfg->dev_mode = DEVICE_MODE_MANUAL;
+        cfg->dev_mode = DEVICE_MODE_MANUAL;
         break; 
     default:
         usage(1);
@@ -1505,6 +1505,22 @@ static void acquire_callback(sdr_event_t *ev, void *ctx)
     //fprintf(stderr, "acquire_callback bc send...\n");
     mg_broadcast(mgr, sdr_handler, (void *)ev, sizeof(*ev));
     //fprintf(stderr, "acquire_callback bc done...\n");
+}
+
+static int start_zmq(r_cfg_t *cfg)
+{
+
+  int rc = zmq_start(cfg->zmq_info, DEFAULT_ASYNC_BUF_NUMBER, cfg->out_block_size);
+
+  if (rc < 0)
+  {
+    cfg->zmq_enabled = false;
+  }
+  else
+  {
+    cfg->zmq_enabled = true;
+  }
+
 }
 
 static int start_sdr(r_cfg_t *cfg)
@@ -2080,6 +2096,14 @@ int main(int argc, char **argv) {
         if (r < 0) {
             exit(2);
         }
+    }
+    if (cfg->use_zmq)
+    {
+        r = start_zmq(cfg);
+    }
+    if (r < 0)
+    {
+        exit(2);
     }
 
     if (cfg->duration > 0) {

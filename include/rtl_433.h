@@ -10,6 +10,7 @@
 #include <time.h>
 #include <signal.h>
 #include <stdbool.h>
+#include "zmq_interface.h"
  
 #define DEFAULT_SAMPLE_RATE     250000
 #define DEFAULT_FREQUENCY       433920000
@@ -57,15 +58,6 @@ typedef enum {
     DEVICE_STATE_GRACE,
     DEVICE_STATE_STARTED,
 } device_state_t;
-
-typedef struct z_cfg {
-    char* address;    // tcp://127.0.0.1:9001
-    char* tcp;        // tcp://127.0.0.1
-    int   port;       // 9001
-    void *context;    // zmq_ctx_new
-    void *requester;  // zmq_socket
-
-} zmq_config;
 
 typedef struct r_cfg {
     device_mode_t dev_mode; ///< Input device run mode

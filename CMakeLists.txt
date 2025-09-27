@@ -14,6 +14,7 @@ endif()
 project(rtl433 C)
 
 #select the release build type by default to get optimization flags
+set(CMAKE_BUILD_TYPE DEBUG)
 if(NOT CMAKE_BUILD_TYPE)
    set(CMAKE_BUILD_TYPE "Release")
    message(STATUS "Build type not specified: defaulting to release.")
