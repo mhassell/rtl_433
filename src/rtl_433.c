@@ -420,7 +420,6 @@ static void reset_sdr_callback(r_cfg_t *cfg)
 static void sdr_callback(unsigned char *iq_buf, uint32_t len, void *ctx)
 {
     //fprintf(stderr, "sdr_callback... %u\n", len);
-    printf("PEN15\n");
     r_cfg_t *cfg = ctx;
     struct dm_state *demod = cfg->demod;
     char time_str[LOCAL_TIME_BUFLEN];
@@ -1352,6 +1351,7 @@ static void parse_conf_option(r_cfg_t *cfg, int opt, char *arg)
         zmq_info->address = address;
         zmq_info->tcp = "";
         zmq_info->port = -1;
+        zmq_info->process_ready = false;
         cfg->zmq_info = zmq_info;
         cfg->use_zmq = true;
         cfg->dev_mode = DEVICE_MODE_MANUAL;
@@ -1521,6 +1521,17 @@ static int start_zmq(r_cfg_t *cfg)
     cfg->zmq_enabled = true;
   }
 
+  cfg->demod->sample_size = 2;
+
+  while(true)
+  {
+    if(cfg->zmq_info->process_ready)
+    {
+      sdr_callback(cfg->zmq_info->buf_num, cfg->zmq_info->buf_len, cfg);
+      cfg->zmq_info->process_ready = false;
+    }
+  }
+  
 }
 
 static int start_sdr(r_cfg_t *cfg)

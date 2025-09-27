@@ -259,8 +259,8 @@ void r_free_cfg(r_cfg_t *cfg)
     free(cfg->mgr);
     cfg->mgr = NULL;
  
-    free(cfg->zmq_info->address);
-    free(cfg->zmq_info);
+    //free(cfg->zmq_info->address);
+    //free(cfg->zmq_info);
     //free(cfg);
 }
 

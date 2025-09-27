@@ -1,17 +1,18 @@
-#include "zmq_interface.h"
 #include <czmq.h>
 #include <stdint.h>
+#include "zmq_interface.h"
 #include "sdr.h"
-#include "rtl_433.h"
 
 static THREAD_RETURN THREAD_CALL acquire_thread(void *arg)
 {
 
-    //zmq_config* zmq_info = (zmq_config*) arg;
+    zmq_config* zmq_info = (zmq_config*) arg;
+        
 
     while(1)
     {
-        char buffer [1800000];
+        //char buffer [1800000];
+        unsigned char *buffer = malloc(1800000*sizeof(unsigned char));
         zmq_recv(zmq_info->requester, buffer, 1800000, 0);
         sdr_event_t ev = {
             .ev               = 1,
@@ -21,8 +22,10 @@ static THREAD_RETURN THREAD_CALL acquire_thread(void *arg)
             .len              = 1800000,
          };
         printf("Running...\n");
+        zmq_info->buf_len = 1800000;
+        zmq_info->buf_num = buffer;
+        zmq_info->process_ready = true;
         sleep(1);
-        sdr_callback(&buffer, 1800000, void *ctx)
 
     }
 
