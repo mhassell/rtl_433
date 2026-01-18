@@ -2141,14 +2141,17 @@ void iq_proc(r_cfg_t *cfg,  struct dm_state *demod)
                             }
                             else
                             {
+                                printf("Found a zero! %i\n", iloc);
                                 break;
                             } 
                         }
                         if(last_fill_point == DEFAULT_BUF_LENGTH/2)
                         {
+                            printf("All Full: %i\n", last_fill_point);
                             break;
                         }
                     }
+                    printf("Hello\n");
 
                     /*
                     for(int i = 0; i < DEFAULT_BUF_LENGTH / 2; i++)
@@ -2160,6 +2163,7 @@ void iq_proc(r_cfg_t *cfg,  struct dm_state *demod)
                         }
                     }
                     */
+                    n_read = DEFAULT_BUF_LENGTH / 2;
                     // clamp float to [-1,1] and scale to Q0.15
                     for (unsigned long n = 0; n < n_read; n++) {
                         int s_tmp = test_mode_float_buf[n] * INT16_MAX;
