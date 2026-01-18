@@ -54,6 +54,7 @@
 #include "fatal.h"
 #include "write_sigrok.h"
 #include "mongoose.h"
+#include "zmq_interface.h"
 
 #ifdef _WIN32
 #include <io.h>
@@ -95,6 +96,9 @@
 #endif
 
 typedef struct timeval delay_timer_t;
+
+void iq_proc(r_cfg_t *cfg,  struct dm_state *demod);
+
 
 static void delay_timer_init(delay_timer_t *delay_timer)
 {
@@ -1523,7 +1527,8 @@ static int start_zmq(r_cfg_t *cfg)
 
   cfg->demod->sample_size = 2;
 
-  while(true)
+  /*
+    while(true)
   {
     if(cfg->zmq_info->process_ready)
     {
@@ -1531,6 +1536,7 @@ static int start_zmq(r_cfg_t *cfg)
       cfg->zmq_info->process_ready = false;
     }
   }
+  */
   
 }
 
@@ -1907,175 +1913,7 @@ int main(int argc, char **argv) {
         exit(!r);
     }
 
-    // Special case for in files
-    if (cfg->in_files.len) {
-        unsigned char *test_mode_buf = malloc(DEFAULT_BUF_LENGTH * sizeof(unsigned char));
-        if (!test_mode_buf)
-            FATAL_MALLOC("test_mode_buf");
-        float *test_mode_float_buf = malloc(DEFAULT_BUF_LENGTH / sizeof(int16_t) * sizeof(float));
-        if (!test_mode_float_buf)
-            FATAL_MALLOC("test_mode_float_buf");
-
-        if (cfg->duration > 0) {
-            time(&cfg->stop_time);
-            cfg->stop_time += cfg->duration;
-        }
-
-        for (void **iter = cfg->in_files.elems; iter && *iter; ++iter) {
-            cfg->in_filename = *iter;
-
-            file_info_clear(&demod->load_info); // reset all info
-            file_info_parse_filename(&demod->load_info, cfg->in_filename);
-            // apply file info or default
-            cfg->samp_rate        = demod->load_info.sample_rate ? demod->load_info.sample_rate : sample_rate_0;
-            cfg->center_frequency = demod->load_info.center_frequency ? demod->load_info.center_frequency : cfg->frequency[0];
-
-            FILE *in_file;
-            if (strcmp(demod->load_info.path, "-") == 0) { // read samples from stdin
-                in_file = stdin;
-                cfg->in_filename = "<stdin>";
-            } else {
-                in_file = fopen(demod->load_info.path, "rb");
-                if (!in_file) {
-                    print_logf(LOG_ERROR, "Input", "Opening file \"%s\" failed!", cfg->in_filename);
-                    break;
-                }
-            }
-            print_logf(LOG_CRITICAL, "Input", "Test mode active. Reading samples from file: %s", cfg->in_filename); // Essential information (not quiet)
-            if (demod->load_info.format == CU8_IQ
-                    || demod->load_info.format == CS8_IQ
-                    || demod->load_info.format == S16_AM
-                    || demod->load_info.format == S16_FM) {
-                demod->sample_size = sizeof(uint8_t) * 2; // CU8, AM, FM
-            } else if (demod->load_info.format == CS16_IQ
-                    || demod->load_info.format == CF32_IQ) {
-                demod->sample_size = sizeof(int16_t) * 2; // CS16, CF32 (after conversion)
-            } else if (demod->load_info.format == PULSE_OOK) {
-                // ignore
-            } else {
-                print_logf(LOG_ERROR, "Input", "Input format invalid \"%s\"", file_info_string(&demod->load_info));
-                break;
-            }
-            if (cfg->verbosity >= LOG_NOTICE) {
-                print_logf(LOG_NOTICE, "Input", "Input format \"%s\"", file_info_string(&demod->load_info));
-            }
-            demod->sample_file_pos = 0.0;
-
-            // special case for pulse data file-inputs
-            if (demod->load_info.format == PULSE_OOK) {
-                while (!cfg->exit_async) {
-                    pulse_data_load(in_file, &demod->pulse_data, cfg->samp_rate);
-                    if (!demod->pulse_data.num_pulses)
-                        break;
-
-                    for (void **iter2 = demod->dumper.elems; iter2 && *iter2; ++iter2) {
-                        file_info_t const *dumper = *iter2;
-                        if (dumper->format == VCD_LOGIC) {
-                            pulse_data_print_vcd(dumper->file, &demod->pulse_data, '\'');
-                        } else if (dumper->format == PULSE_OOK) {
-                            pulse_data_dump(dumper->file, &demod->pulse_data);
-                        } else {
-                            print_logf(LOG_ERROR, "Input", "Dumper (%s) not supported on OOK input", dumper->spec);
-                            exit(1);
-                        }
-                    }
-
-                    if (demod->pulse_data.fsk_f2_est) {
-                        run_fsk_demods(&demod->r_devs, &demod->pulse_data);
-                    }
-                    else {
-                        int p_events = run_ook_demods(&demod->r_devs, &demod->pulse_data);
-                        if (cfg->verbosity >= LOG_DEBUG)
-                            pulse_data_print(&demod->pulse_data);
-                        if (demod->analyze_pulses && (cfg->grab_mode <= 1 || (cfg->grab_mode == 2 && p_events == 0) || (cfg->grab_mode == 3 && p_events > 0))) {
-                            r_device device = {.log_fn = log_device_handler, .output_ctx = cfg};
-                            pulse_analyzer(&demod->pulse_data, PULSE_DATA_OOK, &device);
-                        }
-                    }
-                }
-
-                if (in_file != stdin) {
-                    fclose(in_file);
-                }
-
-                continue;
-            }
-
-            // default case for file-inputs
-            int n_blocks = 0;
-            unsigned long n_read;
-            delay_timer_t delay_timer;
-            delay_timer_init(&delay_timer);
-            do {
-                // Replay in realtime if requested
-                if (cfg->in_replay) {
-                    // per block delay
-                    unsigned delay_us = (unsigned)(1000000llu * DEFAULT_BUF_LENGTH / cfg->samp_rate / demod->sample_size / cfg->in_replay);
-                    if (demod->load_info.format == CF32_IQ)
-                        delay_us /= 2; // adjust for float only reading half as many samples
-                    delay_timer_wait(&delay_timer, delay_us);
-                }
-                // Convert CF32 file to CS16 buffer
-                if (demod->load_info.format == CF32_IQ) {
-                    n_read = fread(test_mode_float_buf, sizeof(float), DEFAULT_BUF_LENGTH / 2, in_file);
-                    // clamp float to [-1,1] and scale to Q0.15
-                    for (unsigned long n = 0; n < n_read; n++) {
-                        int s_tmp = test_mode_float_buf[n] * INT16_MAX;
-                        if (s_tmp < -INT16_MAX)
-                            s_tmp = -INT16_MAX;
-                        else if (s_tmp > INT16_MAX)
-                            s_tmp = INT16_MAX;
-                        ((int16_t *)test_mode_buf)[n] = s_tmp;
-                    }
-                    n_read *= 2; // convert to byte count
-                } else {
-                    n_read = fread(test_mode_buf, 1, DEFAULT_BUF_LENGTH, in_file);
-
-                    // Convert CS8 file to CU8 buffer
-                    if (demod->load_info.format == CS8_IQ) {
-                        for (unsigned long n = 0; n < n_read; n++) {
-                            test_mode_buf[n] = ((int8_t)test_mode_buf[n]) + 128;
-                        }
-                    }
-                }
-                if (n_read == 0) break;  // sdr_callback() will Segmentation Fault with len=0
-                demod->sample_file_pos = ((float)n_blocks * DEFAULT_BUF_LENGTH + n_read) / cfg->samp_rate / demod->sample_size;
-                n_blocks++; // this assumes n_read == DEFAULT_BUF_LENGTH
-                sdr_callback(test_mode_buf, n_read, cfg);
-            } while (n_read != 0 && !cfg->exit_async);
-
-            // Call a last time with cleared samples to ensure EOP detection
-            if (demod->sample_size == 2) { // CU8
-                memset(test_mode_buf, 128, DEFAULT_BUF_LENGTH); // 128 is 0 in unsigned data
-                // or is 127.5 a better 0 in cu8 data?
-                //for (unsigned long n = 0; n < DEFAULT_BUF_LENGTH/2; n++)
-                //    ((uint16_t *)test_mode_buf)[n] = 0x807f;
-            }
-            else { // CF32, CS16
-                    memset(test_mode_buf, 0, DEFAULT_BUF_LENGTH);
-            }
-            demod->sample_file_pos = ((float)n_blocks + 1) * DEFAULT_BUF_LENGTH / cfg->samp_rate / demod->sample_size;
-            sdr_callback(test_mode_buf, DEFAULT_BUF_LENGTH, cfg);
-
-            //Always classify a signal at the end of the file
-            if (demod->am_analyze)
-                am_analyze_classify(demod->am_analyze);
-            if (cfg->verbosity >= LOG_NOTICE) {
-                print_logf(LOG_NOTICE, "Input", "Test mode file issued %d packets", n_blocks);
-            }
-            reset_sdr_callback(cfg);
-
-            if (in_file != stdin) {
-                fclose(in_file);
-            }
-        }
-
-        close_dumpers(cfg);
-        free(test_mode_buf);
-        free(test_mode_float_buf);
-        r_free_cfg(cfg);
-        exit(0);
-    }
+    iq_proc(cfg, demod);
 
     // Normal case, no test data, no in files
     if (cfg->sr_filename) {
@@ -2157,4 +1995,229 @@ int main(int argc, char **argv) {
     r_free_cfg(cfg);
 
     return r >= 0 ? r : -r;
+}
+
+void iq_proc(r_cfg_t *cfg,  struct dm_state *demod)
+{
+
+    uint32_t sample_rate_0 = cfg->samp_rate;
+    zmq_config* zmq_info = cfg->zmq_info;
+    //start_zmq(cfg);
+    zmq_start(zmq_info, 0, 0);
+
+
+
+    // Special case for in files
+    if (cfg->in_files.len) {
+        unsigned char *test_mode_buf = malloc(DEFAULT_BUF_LENGTH * sizeof(unsigned char));
+        if (!test_mode_buf)
+            FATAL_MALLOC("test_mode_buf");
+        float *test_mode_float_buf = malloc(DEFAULT_BUF_LENGTH / sizeof(int16_t) * sizeof(float));
+        if (!test_mode_float_buf)
+            FATAL_MALLOC("test_mode_float_buf");
+
+        if (cfg->duration > 0) {
+            time(&cfg->stop_time);
+            cfg->stop_time += cfg->duration;
+        }
+
+        for (void **iter = cfg->in_files.elems; iter && *iter; ++iter) {
+            cfg->in_filename = *iter;
+
+            file_info_clear(&demod->load_info); // reset all info
+            file_info_parse_filename(&demod->load_info, cfg->in_filename);
+            // apply file info or default
+            cfg->samp_rate        = demod->load_info.sample_rate ? demod->load_info.sample_rate : sample_rate_0;
+            cfg->center_frequency = demod->load_info.center_frequency ? demod->load_info.center_frequency : cfg->frequency[0];
+            
+            /*
+            FILE *in_file;
+            if (strcmp(demod->load_info.path, "-") == 0) { // read samples from stdin
+                in_file = stdin;
+                cfg->in_filename = "<stdin>";
+            } else {
+                in_file = fopen(demod->load_info.path, "rb");
+                if (!in_file) {
+                    print_logf(LOG_ERROR, "Input", "Opening file \"%s\" failed!", cfg->in_filename);
+                    break;
+                }
+            }
+            */
+            print_logf(LOG_CRITICAL, "Input", "Test mode active. Reading samples from file: %s", cfg->in_filename); // Essential information (not quiet)
+            if (demod->load_info.format == CU8_IQ
+                    || demod->load_info.format == CS8_IQ
+                    || demod->load_info.format == S16_AM
+                    || demod->load_info.format == S16_FM) {
+                demod->sample_size = sizeof(uint8_t) * 2; // CU8, AM, FM
+            } else if (demod->load_info.format == CS16_IQ
+                    || demod->load_info.format == CF32_IQ) {
+                demod->sample_size = sizeof(int16_t) * 2; // CS16, CF32 (after conversion)
+            } else if (demod->load_info.format == PULSE_OOK) {
+                // ignore
+            } else {
+                print_logf(LOG_ERROR, "Input", "Input format invalid \"%s\"", file_info_string(&demod->load_info));
+                break;
+            }
+            if (cfg->verbosity >= LOG_NOTICE) {
+                print_logf(LOG_NOTICE, "Input", "Input format \"%s\"", file_info_string(&demod->load_info));
+            }
+            demod->sample_file_pos = 0.0;
+
+            // special case for pulse data file-inputs
+            /*
+            if (demod->load_info.format == PULSE_OOK) {
+                while (!cfg->exit_async) {
+                    pulse_data_load(in_file, &demod->pulse_data, cfg->samp_rate);
+                    if (!demod->pulse_data.num_pulses)
+                        break;
+
+                    for (void **iter2 = demod->dumper.elems; iter2 && *iter2; ++iter2) {
+                        file_info_t const *dumper = *iter2;
+                        if (dumper->format == VCD_LOGIC) {
+                            pulse_data_print_vcd(dumper->file, &demod->pulse_data, '\'');
+                        } else if (dumper->format == PULSE_OOK) {
+                            pulse_data_dump(dumper->file, &demod->pulse_data);
+                        } else {
+                            print_logf(LOG_ERROR, "Input", "Dumper (%s) not supported on OOK input", dumper->spec);
+                            exit(1);
+                        }
+                    }
+
+                    if (demod->pulse_data.fsk_f2_est) {
+                        run_fsk_demods(&demod->r_devs, &demod->pulse_data);
+                    }
+                    else {
+                        int p_events = run_ook_demods(&demod->r_devs, &demod->pulse_data);
+                        if (cfg->verbosity >= LOG_DEBUG)
+                            pulse_data_print(&demod->pulse_data);
+                        if (demod->analyze_pulses && (cfg->grab_mode <= 1 || (cfg->grab_mode == 2 && p_events == 0) || (cfg->grab_mode == 3 && p_events > 0))) {
+                            r_device device = {.log_fn = log_device_handler, .output_ctx = cfg};
+                            pulse_analyzer(&demod->pulse_data, PULSE_DATA_OOK, &device);
+                        }
+                    }
+                }
+
+                if (in_file != stdin) {
+                    fclose(in_file);
+                }
+
+                continue;
+            }
+            */
+
+
+            // default case for file-inputs
+            int n_blocks = 0;
+            unsigned long n_read;
+            delay_timer_t delay_timer;
+            delay_timer_init(&delay_timer);
+            do {
+                // Replay in realtime if requested
+                if (cfg->in_replay) {
+                    // per block delay
+                    unsigned delay_us = (unsigned)(1000000llu * DEFAULT_BUF_LENGTH / cfg->samp_rate / demod->sample_size / cfg->in_replay);
+                    if (demod->load_info.format == CF32_IQ)
+                        delay_us /= 2; // adjust for float only reading half as many samples
+                    delay_timer_wait(&delay_timer, delay_us);
+                }
+                // HERE
+                // Convert CF32 file to CS16 buffer
+                if (demod->load_info.format == CF32_IQ) {
+                    //n_read = fread(test_mode_float_buf, sizeof(float), DEFAULT_BUF_LENGTH / 2, in_file);
+                    float tmp[8192];
+                    
+                    size_t last_fill_point = 0;  // where we left off filling test_mode_float_buf
+                    while(1)
+                    {
+                        n_read = zmq_recv(zmq_info->requester, tmp, DEFAULT_BUF_LENGTH / 2, 0);
+                        size_t iloc = 0; 
+                        while((last_fill_point < DEFAULT_BUF_LENGTH / 2) && (iloc < 8192))
+                        {
+                            if(tmp[iloc] != 0)
+                            {
+                                test_mode_float_buf[last_fill_point] = tmp[iloc];
+                                last_fill_point++;
+                                iloc++;
+                            }
+                            else
+                            {
+                                break;
+                            } 
+                        }
+                        if(last_fill_point == DEFAULT_BUF_LENGTH/2)
+                        {
+                            break;
+                        }
+                    }
+
+                    /*
+                    for(int i = 0; i < DEFAULT_BUF_LENGTH / 2; i++)
+                    {
+                        if(test_mode_float_buf[i] == 0)
+                        {
+                            printf("Zero: %i\n", i);
+                            break; 
+                        }
+                    }
+                    */
+                    // clamp float to [-1,1] and scale to Q0.15
+                    for (unsigned long n = 0; n < n_read; n++) {
+                        int s_tmp = test_mode_float_buf[n] * INT16_MAX;
+                        if (s_tmp < -INT16_MAX)
+                            s_tmp = -INT16_MAX;
+                        else if (s_tmp > INT16_MAX)
+                            s_tmp = INT16_MAX;
+                        ((int16_t *)test_mode_buf)[n] = s_tmp;
+                    }
+                    n_read *= 2; // convert to byte count
+                } else {
+                    //n_read = fread(test_mode_buf, 1, DEFAULT_BUF_LENGTH, in_file);
+
+                    // Convert CS8 file to CU8 buffer
+                    if (demod->load_info.format == CS8_IQ) {
+                        for (unsigned long n = 0; n < n_read; n++) {
+                            test_mode_buf[n] = ((int8_t)test_mode_buf[n]) + 128;
+                        }
+                    }
+                }
+                if (n_read == 0) break;  // sdr_callback() will Segmentation Fault with len=0
+                demod->sample_file_pos = ((float)n_blocks * DEFAULT_BUF_LENGTH + n_read) / cfg->samp_rate / demod->sample_size;
+                n_blocks++; // this assumes n_read == DEFAULT_BUF_LENGTH
+                sdr_callback(test_mode_buf, n_read, cfg);
+            } while (n_read != 0 && !cfg->exit_async);
+
+            // Call a last time with cleared samples to ensure EOP detection
+            if (demod->sample_size == 2) { // CU8
+                memset(test_mode_buf, 128, DEFAULT_BUF_LENGTH); // 128 is 0 in unsigned data
+                // or is 127.5 a better 0 in cu8 data?
+                //for (unsigned long n = 0; n < DEFAULT_BUF_LENGTH/2; n++)
+                //    ((uint16_t *)test_mode_buf)[n] = 0x807f;
+            }
+            else { // CF32, CS16
+                    memset(test_mode_buf, 0, DEFAULT_BUF_LENGTH);
+            }
+            demod->sample_file_pos = ((float)n_blocks + 1) * DEFAULT_BUF_LENGTH / cfg->samp_rate / demod->sample_size;
+            printf("n_blocks %i\n", n_blocks);
+            sdr_callback(test_mode_buf, DEFAULT_BUF_LENGTH, cfg);
+
+            //Always classify a signal at the end of the file
+            if (demod->am_analyze)
+                am_analyze_classify(demod->am_analyze);
+            if (cfg->verbosity >= LOG_NOTICE) {
+                print_logf(LOG_NOTICE, "Input", "Test mode file issued %d packets", n_blocks);
+            }
+            reset_sdr_callback(cfg);
+
+            //if (in_file != stdin) {
+            //    fclose(in_file);
+            //}
+        }
+
+        close_dumpers(cfg);
+        free(test_mode_buf);
+        free(test_mode_float_buf);
+        r_free_cfg(cfg);
+        exit(0);
+    }
+
 }

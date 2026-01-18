@@ -44,6 +44,7 @@ int zmq_start(zmq_config *zmq_info, uint32_t buf_num, uint32_t buf_len)
         return rc;
     }
 
+/*
     zmq_info->buf_num = buf_num;
     zmq_info->buf_len = buf_len;
     zmq_info->thread = (pthread_t) zmq_info->thread;
@@ -61,6 +62,7 @@ int zmq_start(zmq_config *zmq_info, uint32_t buf_num, uint32_t buf_len)
     if (r) {
         fprintf(stderr, "%s: error in pthread_create, rc: %d\n", __func__, r);
     }
-    return r;
+*/
+    return rc;
 }
 
