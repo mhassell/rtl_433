@@ -2005,8 +2005,6 @@ void iq_proc(r_cfg_t *cfg,  struct dm_state *demod)
     //start_zmq(cfg);
     zmq_start(zmq_info, 0, 0);
 
-
-
     // Special case for in files
     if (cfg->in_files.len) {
         unsigned char *test_mode_buf = malloc(DEFAULT_BUF_LENGTH * sizeof(unsigned char));
@@ -2124,35 +2122,33 @@ void iq_proc(r_cfg_t *cfg,  struct dm_state *demod)
                 // Convert CF32 file to CS16 buffer
                 if (demod->load_info.format == CF32_IQ) {
                     //n_read = fread(test_mode_float_buf, sizeof(float), DEFAULT_BUF_LENGTH / 2, in_file);
-                    float tmp[16382];
+                    float tmp[16384*2*2*2*2];
                     
                     size_t last_fill_point = 0;  // where we left off filling test_mode_float_buf
+                    size_t iloc = 0;
+                    unsigned int num_points = 0;
                     while(1)
                     {
+                        iloc = 0; 
                         n_read = zmq_recv(zmq_info->requester, tmp, DEFAULT_BUF_LENGTH / 2, 0);
-                        size_t iloc = 0; 
-                        while((last_fill_point < DEFAULT_BUF_LENGTH / 2) && (iloc < 16382))
+                        num_points = n_read / sizeof(float);
+                        while((last_fill_point < DEFAULT_BUF_LENGTH / 2) && (iloc < num_points))
                         {
-                            if(tmp[iloc] != 0)
-                            {
-                                test_mode_float_buf[last_fill_point] = tmp[iloc];
-                                last_fill_point++;
-                                iloc++;
-                            }
-                            else
-                            {
-                                //printf("iloc was zero: %i\n", iloc);
-                                break;
-                            } 
+                            test_mode_float_buf[last_fill_point] = tmp[iloc];
+                            last_fill_point++;
+                            iloc++;
                         }
+
                         if(last_fill_point == DEFAULT_BUF_LENGTH/2)
                         {
-                            //printf("All full: %i\n", last_fill_point);
+                            printf("All full: %i\n", last_fill_point);
+                            last_fill_point = 0;
+                            iloc = 0;
                             break;
                         }
                     }
 
-                    /*
+                    
                     for(int i = 0; i < DEFAULT_BUF_LENGTH / 2; i++)
                     {
                         if(test_mode_float_buf[i] == 0)
@@ -2161,7 +2157,7 @@ void iq_proc(r_cfg_t *cfg,  struct dm_state *demod)
                             break; 
                         }
                     }
-                    */
+                    
                     n_read = DEFAULT_BUF_LENGTH / 2;
                     // clamp float to [-1,1] and scale to Q0.15
                     for (unsigned long n = 0; n < n_read; n++) {
@@ -2175,7 +2171,31 @@ void iq_proc(r_cfg_t *cfg,  struct dm_state *demod)
                     n_read *= 2; // convert to byte count
                 } else {
                     //n_read = fread(test_mode_buf, 1, DEFAULT_BUF_LENGTH, in_file);
+                    uint8_t tmp[DEFAULT_BUF_LENGTH / 2];
+                    
+                    size_t last_fill_point = 0;  // where we left off filling test_mode_float_buf
+                    size_t iloc = 0; 
+                    while(1)
+                    {
+                        iloc = 0; 
+                        n_read = zmq_recv(zmq_info->requester, tmp, DEFAULT_BUF_LENGTH / 2, 0);
+                        size_t num_uint8_read = n_read / sizeof( uint8_t);
+                        while((last_fill_point < DEFAULT_BUF_LENGTH / 2) && (iloc < num_uint8_read ))
+                        {
+                            test_mode_buf[last_fill_point] = tmp[iloc];
+                            last_fill_point++;
+                            iloc++;
+                             
+                        }
 
+                        if(last_fill_point == DEFAULT_BUF_LENGTH/2)
+                        {
+                            printf("All full: %i\n", last_fill_point);
+                            last_fill_point = 0;
+                            iloc = 0;
+                            break;
+                        }
+                    }
                     // Convert CS8 file to CU8 buffer
                     if (demod->load_info.format == CS8_IQ) {
                         for (unsigned long n = 0; n < n_read; n++) {
@@ -2186,6 +2206,7 @@ void iq_proc(r_cfg_t *cfg,  struct dm_state *demod)
                 if (n_read == 0) break;  // sdr_callback() will Segmentation Fault with len=0
                 demod->sample_file_pos = ((float)n_blocks * DEFAULT_BUF_LENGTH + n_read) / cfg->samp_rate / demod->sample_size;
                 n_blocks++; // this assumes n_read == DEFAULT_BUF_LENGTH
+                //printf("Callback\n");
                 sdr_callback(test_mode_buf, n_read, cfg);
             } while (n_read != 0 && !cfg->exit_async);
 
