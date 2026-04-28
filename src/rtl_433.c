@@ -2122,7 +2122,7 @@ void iq_proc(r_cfg_t *cfg,  struct dm_state *demod)
                 // Convert CF32 file to CS16 buffer
                 if (demod->load_info.format == CF32_IQ) {
                     //n_read = fread(test_mode_float_buf, sizeof(float), DEFAULT_BUF_LENGTH / 2, in_file);
-                    float tmp[16384*2*2*2*2];
+                    float tmp[16384*2];
                     
                     size_t last_fill_point = 0;  // where we left off filling test_mode_float_buf
                     size_t iloc = 0;
@@ -2130,7 +2130,8 @@ void iq_proc(r_cfg_t *cfg,  struct dm_state *demod)
                     while(1)
                     {
                         iloc = 0; 
-                        n_read = zmq_recv(zmq_info->requester, tmp, DEFAULT_BUF_LENGTH / 2, 0);
+                        n_read = zmq_recv(zmq_info->requester, tmp, DEFAULT_BUF_LENGTH/2, 0);
+                        //printf("n read: %li\n", n_read);
                         num_points = n_read / sizeof(float);
                         while((last_fill_point < DEFAULT_BUF_LENGTH / 2) && (iloc < num_points))
                         {
@@ -2141,7 +2142,7 @@ void iq_proc(r_cfg_t *cfg,  struct dm_state *demod)
 
                         if(last_fill_point == DEFAULT_BUF_LENGTH/2)
                         {
-                            printf("All full: %i\n", last_fill_point);
+                            //printf("All full: %i\n", last_fill_point);
                             last_fill_point = 0;
                             iloc = 0;
                             break;
