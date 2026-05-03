@@ -1345,7 +1345,7 @@ static void parse_conf_option(r_cfg_t *cfg, int opt, char *arg)
             cfg->after_successful_events_flag = atobv(arg, 1);
         }
         break;
-    case 'Z':
+     case 'Z':
         fprintf(stdout, "Using ZMQ connection %s\n", arg);
         size_t len_address = strlen(arg);
         char * address = malloc(len_address*sizeof(char));
@@ -1353,13 +1353,13 @@ static void parse_conf_option(r_cfg_t *cfg, int opt, char *arg)
         zmq_config *zmq_info;
         zmq_info = malloc(sizeof(zmq_config));
         zmq_info->address = address;
-        zmq_info->tcp = "";
-        zmq_info->port = -1;
-        zmq_info->process_ready = false;
+        //zmq_info->tcp = "";
+        //zmq_info->port = -1;
+        //zmq_info->process_ready = false;
         cfg->zmq_info = zmq_info;
         cfg->use_zmq = true;
-        cfg->dev_mode = DEVICE_MODE_MANUAL;
-        break; 
+        //cfg->dev_mode = DEVICE_MODE_MANUAL;
+       break; 
     default:
         usage(1);
         break;
@@ -1526,18 +1526,6 @@ static int start_zmq(r_cfg_t *cfg)
   }
 
   cfg->demod->sample_size = 2;
-
-  /*
-    while(true)
-  {
-    if(cfg->zmq_info->process_ready)
-    {
-      sdr_callback(cfg->zmq_info->buf_num, cfg->zmq_info->buf_len, cfg);
-      cfg->zmq_info->process_ready = false;
-    }
-  }
-  */
-  
 }
 
 static int start_sdr(r_cfg_t *cfg)
@@ -2002,10 +1990,9 @@ void iq_proc(r_cfg_t *cfg,  struct dm_state *demod)
 
     uint32_t sample_rate_0 = cfg->samp_rate;
     zmq_config* zmq_info = cfg->zmq_info;
-    //start_zmq(cfg);
     zmq_start(zmq_info, 0, 0);
 
-    // Special case for in files
+    // Special case for in files or zmq
     if (cfg->in_files.len) {
         unsigned char *test_mode_buf = malloc(DEFAULT_BUF_LENGTH * sizeof(unsigned char));
         if (!test_mode_buf)
