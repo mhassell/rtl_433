@@ -13,16 +13,10 @@ typedef struct z_cfg {
     int   port;       // 9001
     void *context;    // zmq_ctx_new
     void *requester;  // zmq_socket
-    unsigned char* buf_num;
-    uint32_t buf_len;
-    pthread_t thread;
-    pthread_mutex_t lock; ///< lock for exit_acquire
-    int exit_acquire;
-    bool process_ready;
 
 } zmq_config;
 
-int zmq_start(zmq_config*, uint32_t, uint32_t);
+int zmq_start(zmq_config*);
 
 
 #endif

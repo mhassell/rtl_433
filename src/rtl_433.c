@@ -27,6 +27,12 @@
 #include <string.h>
 #include <errno.h>
 #include <signal.h>
+#include <pthread.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <zmq.h>
+
 
 #include "rtl_433.h"
 #include "r_private.h"
@@ -55,6 +61,8 @@
 #include "write_sigrok.h"
 #include "mongoose.h"
 #include "zmq_interface.h"
+#include "zmq.h"
+#include "czmq.h"
 
 #ifdef _WIN32
 #include <io.h>
@@ -95,10 +103,121 @@
 #define usleep(us) Sleep((us) / 1000)
 #endif
 
+#define ACC_INITIAL_MULT 4    /* initial cap = DEFAULT_BUF_LENGTH * ACC_INITIAL_MULT */
+#define ACC_MAX_MULT     256  /* maximum cap = DEFAULT_BUF_LENGTH * ACC_MAX_MULT */
+
+typedef struct {
+    uint8_t *buf;         /* allocated storage */
+    size_t len;           /* current bytes stored */
+    size_t cap;           /* current capacity */
+    pthread_mutex_t mtx;
+    pthread_cond_t  cond;
+} acc_t;
+
+typedef struct {
+    r_cfg_t *cfg;
+    struct dm_state *demod;
+    acc_t *acc;            /* accumulator to append into */
+    int running;           /* set to 0 to stop */
+} producer_args_t;
+
+
+
+
+
+#define PRODUCER_READ_CHUNK (64 * 1024) /* 64 KiB */
+
+
 typedef struct timeval delay_timer_t;
 
 void iq_proc(r_cfg_t *cfg,  struct dm_state *demod);
 
+/* Initialize accumulator with capacity derived from DEFAULT_BUF_LENGTH */
+static int acc_init(acc_t *a, size_t default_buf_len)
+{
+    if (!a) return -1;
+    a->len = 0;
+    a->cap = default_buf_len * ACC_INITIAL_MULT;
+    if (a->cap < default_buf_len) a->cap = default_buf_len; /* overflow safety */
+    a->buf = (uint8_t *)malloc(a->cap);
+    if (!a->buf) return -1;
+    pthread_mutex_init(&a->mtx, NULL);
+    pthread_cond_init(&a->cond, NULL);
+    return 0;
+}
+
+static void acc_free(acc_t *a)
+{
+    if (!a) return;
+    pthread_mutex_lock(&a->mtx);
+    free(a->buf);
+    a->buf = NULL;
+    a->len = 0;
+    a->cap = 0;
+    pthread_mutex_unlock(&a->mtx);
+    pthread_mutex_destroy(&a->mtx);
+    pthread_cond_destroy(&a->cond);
+}
+
+/* Append bytes to accumulator (thread-safe). Returns 0 on success,
+ * -1 on allocation failure, -2 if appending would exceed maximal allowed capacity.
+ */
+static int acc_append(acc_t *a, const void *data, size_t n, size_t default_buf_len)
+{
+    if (!a || !data || n == 0) return 0;
+    size_t max_cap = default_buf_len * ACC_MAX_MULT;
+    pthread_mutex_lock(&a->mtx);
+
+    if (a->len + n > a->cap) {
+        size_t newcap = a->cap ? a->cap : default_buf_len;
+        while (newcap < a->len + n && newcap < max_cap) {
+            newcap *= 2;
+            if (newcap == 0) newcap = a->cap + n; /* overflow guard */
+        }
+        if (newcap > max_cap) newcap = max_cap;
+        if (newcap < a->len + n) {
+            /* cannot grow enough */
+            pthread_mutex_unlock(&a->mtx);
+            return -2;
+        }
+        uint8_t *nb = (uint8_t *)realloc(a->buf, newcap);
+        if (!nb) {
+            pthread_mutex_unlock(&a->mtx);
+            return -1;
+        }
+        a->buf = nb;
+        a->cap = newcap;
+    }
+    memcpy(a->buf + a->len, data, n);
+    a->len += n;
+    pthread_cond_signal(&a->cond);
+    pthread_mutex_unlock(&a->mtx);
+    return 0;
+}
+
+/* Consume exactly n bytes into out. Blocks until n bytes are available or until running==0.
+ * Returns 1 if consumed, 0 if not (running==0 and not enough bytes).
+ */
+static int acc_consume_blocking(acc_t *a, void *out, size_t n, int *running)
+{
+    if (!a || !out) return 0;
+    pthread_mutex_lock(&a->mtx);
+    while (a->len < n && (running ? *running : 1)) {
+        pthread_cond_wait(&a->cond, &a->mtx);
+    }
+    if (a->len < n) {
+        /* not enough and probably stopping */
+        pthread_mutex_unlock(&a->mtx);
+        return 0;
+    }
+    memcpy(out, a->buf, n);
+    size_t remaining = a->len - n;
+    if (remaining)
+        memmove(a->buf, a->buf + n, remaining);
+    a->len = remaining;
+    pthread_mutex_unlock(&a->mtx);
+    return 1;
+}
 
 static void delay_timer_init(delay_timer_t *delay_timer)
 {
@@ -401,6 +520,98 @@ static void help_write(void)
             "\tforced overrides: am:s16:path/filename.ext\n");
     exit(0);
 }
+
+/* Producer thread: reads from either a file/fifo (demod->load_info.path)
+ * or from the ZMQ subscription socket in cfg->zmq_info and appends
+ * data into the accumulator. */
+static void *producer_thread_fn(void *vargs)
+{
+    producer_args_t *parg = (producer_args_t *)vargs;
+    r_cfg_t *cfg = parg->cfg;
+    struct dm_state *demod = parg->demod;
+    acc_t *acc = parg->acc;
+    uint8_t readbuf[PRODUCER_READ_CHUNK];
+
+    if (cfg->use_zmq && cfg->zmq_info && cfg->zmq_info->requester) {
+        /* read ZMQ messages (multipart supported by using RCVMORE loop) */
+        while (parg->running && !cfg->exit_async) {
+            zmq_msg_t msg;
+            zmq_msg_init(&msg);
+            int rc = zmq_msg_recv(&msg, cfg->zmq_info->requester, 0);
+            if (rc == -1) {
+                zmq_msg_close(&msg);
+                if (errno == EAGAIN) {
+                    usleep(1000);
+                    continue;
+                }
+                /* other errors, abort */
+                perror("zmq_msg_recv");
+                break;
+            }
+            size_t msg_size = zmq_msg_size(&msg);
+            const void *msg_data = zmq_msg_data(&msg);
+            if (msg_size > 0) {
+                int a_rc = acc_append(acc, msg_data, msg_size, DEFAULT_BUF_LENGTH);
+                if (a_rc == -2) {
+                    print_logf(LOG_ERROR, "ZMQ", "Accumulator max cap reached; dropping %zu bytes", msg_size);
+                } else if (a_rc == -1) {
+                    print_log(LOG_ERROR, "ZMQ", "Accumulator realloc failed");
+                }
+            }
+            zmq_msg_close(&msg);
+
+            /* If this message is multipart, continue loop to receive next part.
+               ZMQ_RCVMORE is checked by zmq_getsockopt after each recv. */
+            int more = 0; size_t more_size = sizeof(more);
+            if (zmq_getsockopt(cfg->zmq_info->requester, ZMQ_RCVMORE, &more, &more_size) == 0 && more)
+                continue;
+        }
+    } else {
+        /* File/FIFO reader: open demod->load_info.path and read large blocks */
+        const char *path = demod->load_info.path;
+        if (!path) {
+            print_log(LOG_ERROR, "Producer", "No input path for file reader");
+            parg->running = 0;
+            return NULL;
+        }
+
+        int fd = open(path, O_RDONLY);
+        if (fd < 0) {
+            print_logf(LOG_ERROR, "Producer", "Failed to open input \"%s\": %s", path, strerror(errno));
+            parg->running = 0;
+            return NULL;
+        }
+        /* Optionally we could fcntl(F_SETPIPE_SZ, ...) here if we control the writer */
+        while (parg->running && !cfg->exit_async) {
+            ssize_t n = read(fd, readbuf, sizeof(readbuf));
+            if (n > 0) {
+                size_t to_append = (size_t)n;
+                int a_rc = acc_append(acc, readbuf, to_append, DEFAULT_BUF_LENGTH);
+                if (a_rc == -2) {
+                    print_logf(LOG_ERROR, "Producer", "Accumulator max cap reached; dropping %zu bytes", to_append);
+                    /* If drop policy is unacceptable, consider blocking here until space freed */
+                } else if (a_rc == -1) {
+                    print_log(LOG_ERROR, "Producer", "Accumulator realloc failed");
+                }
+            } else if (n == 0) {
+                /* EOF on FIFO (writer closed); wait a short while and retry */
+                usleep(5000);
+                continue;
+            } else {
+                if (errno == EINTR) continue;
+                print_logf(LOG_ERROR, "Producer", "read error: %s", strerror(errno));
+                break;
+            }
+        }
+        close(fd);
+    }
+
+    parg->running = 0;
+    /* Wake any waiting consumer so it can exit */
+    pthread_cond_broadcast(&acc->cond);
+    return NULL;
+}
+
 
 static void reset_sdr_callback(r_cfg_t *cfg)
 {
@@ -1514,7 +1725,7 @@ static void acquire_callback(sdr_event_t *ev, void *ctx)
 static int start_zmq(r_cfg_t *cfg)
 {
 
-  int rc = zmq_start(cfg->zmq_info, DEFAULT_ASYNC_BUF_NUMBER, cfg->out_block_size);
+  int rc = zmq_start(cfg->zmq_info);
 
   if (rc < 0)
   {
@@ -1526,6 +1737,9 @@ static int start_zmq(r_cfg_t *cfg)
   }
 
   cfg->demod->sample_size = 2;
+
+  return rc;
+
 }
 
 static int start_sdr(r_cfg_t *cfg)
@@ -1985,19 +2199,25 @@ int main(int argc, char **argv) {
     return r >= 0 ? r : -r;
 }
 
-void iq_proc(r_cfg_t *cfg,  struct dm_state *demod)
+
+void iq_proc(r_cfg_t *cfg, struct dm_state *demod)
 {
-
     uint32_t sample_rate_0 = cfg->samp_rate;
-    zmq_config* zmq_info = cfg->zmq_info;
-    zmq_start(zmq_info, 0, 0);
+    zmq_config *zmq_info = cfg->zmq_info;
 
-    // Special case for in files or zmq
+    /* Ensure ZMQ subsystem is started if configured (no-op if not used) */
+    if (zmq_info)
+        zmq_start(zmq_info);
+
+    /* Special case for in files or zmq-fed test data */
     if (cfg->in_files.len) {
-        unsigned char *test_mode_buf = malloc(DEFAULT_BUF_LENGTH * sizeof(unsigned char));
+        unsigned char *test_mode_buf = malloc(DEFAULT_BUF_LENGTH);
         if (!test_mode_buf)
             FATAL_MALLOC("test_mode_buf");
-        float *test_mode_float_buf = malloc(DEFAULT_BUF_LENGTH / sizeof(int16_t) * sizeof(float));
+
+        /* For CF32 conversion: we need space for DEFAULT_BUF_LENGTH/2 floats */
+        size_t floats_capacity = DEFAULT_BUF_LENGTH / 2;
+        float *test_mode_float_buf = malloc(floats_capacity * sizeof(float));
         if (!test_mode_float_buf)
             FATAL_MALLOC("test_mode_float_buf");
 
@@ -2009,36 +2229,25 @@ void iq_proc(r_cfg_t *cfg,  struct dm_state *demod)
         for (void **iter = cfg->in_files.elems; iter && *iter; ++iter) {
             cfg->in_filename = *iter;
 
-            file_info_clear(&demod->load_info); // reset all info
+            file_info_clear(&demod->load_info);
             file_info_parse_filename(&demod->load_info, cfg->in_filename);
-            // apply file info or default
-            cfg->samp_rate        = demod->load_info.sample_rate ? demod->load_info.sample_rate : sample_rate_0;
+
+            /* apply file info or default */
+            cfg->samp_rate = demod->load_info.sample_rate ? demod->load_info.sample_rate : sample_rate_0;
             cfg->center_frequency = demod->load_info.center_frequency ? demod->load_info.center_frequency : cfg->frequency[0];
-            
-            /*
-            FILE *in_file;
-            if (strcmp(demod->load_info.path, "-") == 0) { // read samples from stdin
-                in_file = stdin;
-                cfg->in_filename = "<stdin>";
-            } else {
-                in_file = fopen(demod->load_info.path, "rb");
-                if (!in_file) {
-                    print_logf(LOG_ERROR, "Input", "Opening file \"%s\" failed!", cfg->in_filename);
-                    break;
-                }
-            }
-            */
-            print_logf(LOG_CRITICAL, "Input", "Test mode active. Reading samples from file: %s", cfg->in_filename); // Essential information (not quiet)
+
+            print_logf(LOG_CRITICAL, "Input", "Test mode active. Reading samples from file: %s", cfg->in_filename);
+
             if (demod->load_info.format == CU8_IQ
-                    || demod->load_info.format == CS8_IQ
-                    || demod->load_info.format == S16_AM
-                    || demod->load_info.format == S16_FM) {
-                demod->sample_size = sizeof(uint8_t) * 2; // CU8, AM, FM
+                || demod->load_info.format == CS8_IQ
+                || demod->load_info.format == S16_AM
+                || demod->load_info.format == S16_FM) {
+                demod->sample_size = sizeof(uint8_t) * 2;
             } else if (demod->load_info.format == CS16_IQ
-                    || demod->load_info.format == CF32_IQ) {
-                demod->sample_size = sizeof(int16_t) * 2; // CS16, CF32 (after conversion)
+                       || demod->load_info.format == CF32_IQ) {
+                demod->sample_size = sizeof(int16_t) * 2;
             } else if (demod->load_info.format == PULSE_OOK) {
-                // ignore
+                /* handled elsewhere */
             } else {
                 print_logf(LOG_ERROR, "Input", "Input format invalid \"%s\"", file_info_string(&demod->load_info));
                 break;
@@ -2048,188 +2257,111 @@ void iq_proc(r_cfg_t *cfg,  struct dm_state *demod)
             }
             demod->sample_file_pos = 0.0;
 
-            // special case for pulse data file-inputs
-            /*
-            if (demod->load_info.format == PULSE_OOK) {
-                while (!cfg->exit_async) {
-                    pulse_data_load(in_file, &demod->pulse_data, cfg->samp_rate);
-                    if (!demod->pulse_data.num_pulses)
-                        break;
-
-                    for (void **iter2 = demod->dumper.elems; iter2 && *iter2; ++iter2) {
-                        file_info_t const *dumper = *iter2;
-                        if (dumper->format == VCD_LOGIC) {
-                            pulse_data_print_vcd(dumper->file, &demod->pulse_data, '\'');
-                        } else if (dumper->format == PULSE_OOK) {
-                            pulse_data_dump(dumper->file, &demod->pulse_data);
-                        } else {
-                            print_logf(LOG_ERROR, "Input", "Dumper (%s) not supported on OOK input", dumper->spec);
-                            exit(1);
-                        }
-                    }
-
-                    if (demod->pulse_data.fsk_f2_est) {
-                        run_fsk_demods(&demod->r_devs, &demod->pulse_data);
-                    }
-                    else {
-                        int p_events = run_ook_demods(&demod->r_devs, &demod->pulse_data);
-                        if (cfg->verbosity >= LOG_DEBUG)
-                            pulse_data_print(&demod->pulse_data);
-                        if (demod->analyze_pulses && (cfg->grab_mode <= 1 || (cfg->grab_mode == 2 && p_events == 0) || (cfg->grab_mode == 3 && p_events > 0))) {
-                            r_device device = {.log_fn = log_device_handler, .output_ctx = cfg};
-                            pulse_analyzer(&demod->pulse_data, PULSE_DATA_OOK, &device);
-                        }
-                    }
-                }
-
-                if (in_file != stdin) {
-                    fclose(in_file);
-                }
-
-                continue;
-            }
-            */
-
-
-            // default case for file-inputs
             int n_blocks = 0;
-            unsigned long n_read;
+            unsigned long n_read = 0;
             delay_timer_t delay_timer;
             delay_timer_init(&delay_timer);
+
+            /* Setup accumulator and producer thread that will read from the source
+               (either ZMQ or the filesystem FIFO) and append into the accumulator. */
+            acc_t byte_acc = {0};
+            if (acc_init(&byte_acc, DEFAULT_BUF_LENGTH) < 0) {
+                print_log(LOG_ERROR, "Input", "Failed to initialize accumulator");
+                break;
+            }
+
+            producer_args_t parg = {0};
+            parg.cfg = cfg;
+            parg.demod = demod;
+            parg.acc = &byte_acc;
+            parg.running = 1;
+
+            pthread_t producer_tid;
+            if (pthread_create(&producer_tid, NULL, producer_thread_fn, &parg) != 0) {
+                print_log(LOG_ERROR, "Input", "Failed to start producer thread");
+                acc_free(&byte_acc);
+                break;
+            }
+
+            /* Consumer loop: wait for whole chunks, process and call sdr_callback */
             do {
-                // Replay in realtime if requested
                 if (cfg->in_replay) {
-                    // per block delay
-                    unsigned delay_us = (unsigned)(1000000llu * DEFAULT_BUF_LENGTH / cfg->samp_rate / demod->sample_size / cfg->in_replay);
+                    unsigned delay_us = (unsigned)(1000000ull * DEFAULT_BUF_LENGTH / cfg->samp_rate / demod->sample_size / cfg->in_replay);
                     if (demod->load_info.format == CF32_IQ)
-                        delay_us /= 2; // adjust for float only reading half as many samples
+                        delay_us /= 2;
                     delay_timer_wait(&delay_timer, delay_us);
                 }
-                // HERE
-                // Convert CF32 file to CS16 buffer
+
                 if (demod->load_info.format == CF32_IQ) {
-                    //n_read = fread(test_mode_float_buf, sizeof(float), DEFAULT_BUF_LENGTH / 2, in_file);
-                    float tmp[16384*2];
-                    
-                    size_t last_fill_point = 0;  // where we left off filling test_mode_float_buf
-                    size_t iloc = 0;
-                    unsigned int num_points = 0;
-                    while(1)
-                    {
-                        iloc = 0; 
-                        n_read = zmq_recv(zmq_info->requester, tmp, DEFAULT_BUF_LENGTH/2, 0);
-                        //printf("n read: %li\n", n_read);
-                        num_points = n_read / sizeof(float);
-                        while((last_fill_point < DEFAULT_BUF_LENGTH / 2) && (iloc < num_points))
-                        {
-                            test_mode_float_buf[last_fill_point] = tmp[iloc];
-                            last_fill_point++;
-                            iloc++;
-                        }
+                    /* We expect floats_needed floats (each 4 bytes) which represent
+                       DEFAULT_BUF_LENGTH/2 float samples to convert into int16 stream.
+                       bytes_needed is the number of float bytes required. */
+                    size_t floats_needed = DEFAULT_BUF_LENGTH / 2;
+                    size_t bytes_needed = floats_needed * sizeof(float);
 
-                        if(last_fill_point == DEFAULT_BUF_LENGTH/2)
-                        {
-                            //printf("All full: %i\n", last_fill_point);
-                            last_fill_point = 0;
-                            iloc = 0;
-                            break;
-                        }
+                    /* Block until enough float bytes available or producer stops */
+                    if (!acc_consume_blocking(&byte_acc, test_mode_float_buf, bytes_needed, &parg.running)) {
+                        /* Not enough data and producer stopped or exit requested */
+                        break;
                     }
 
-                    
-                    for(int i = 0; i < DEFAULT_BUF_LENGTH / 2; i++)
-                    {
-                        if(test_mode_float_buf[i] == 0)
-                        {
-                            printf("Zero: %i\n", i);
-                            break; 
-                        }
+                    /* Convert floats (assumed in [-1,1]) into int16 Q0.15 in test_mode_buf */
+                    for (size_t i = 0; i < floats_needed; ++i) {
+                        int tmp = (int)(test_mode_float_buf[i] * INT16_MAX);
+                        if (tmp < -INT16_MAX) tmp = -INT16_MAX;
+                        else if (tmp > INT16_MAX) tmp = INT16_MAX;
+                        ((int16_t *)test_mode_buf)[i] = (int16_t)tmp;
                     }
-                    
-                    n_read = DEFAULT_BUF_LENGTH / 2;
-                    // clamp float to [-1,1] and scale to Q0.15
-                    for (unsigned long n = 0; n < n_read; n++) {
-                        int s_tmp = test_mode_float_buf[n] * INT16_MAX;
-                        if (s_tmp < -INT16_MAX)
-                            s_tmp = -INT16_MAX;
-                        else if (s_tmp > INT16_MAX)
-                            s_tmp = INT16_MAX;
-                        ((int16_t *)test_mode_buf)[n] = s_tmp;
-                    }
-                    n_read *= 2; // convert to byte count
+                    n_read = floats_needed * sizeof(int16_t);
                 } else {
-                    //n_read = fread(test_mode_buf, 1, DEFAULT_BUF_LENGTH, in_file);
-                    uint8_t tmp[DEFAULT_BUF_LENGTH / 2];
-                    
-                    size_t last_fill_point = 0;  // where we left off filling test_mode_float_buf
-                    size_t iloc = 0; 
-                    while(1)
-                    {
-                        iloc = 0; 
-                        n_read = zmq_recv(zmq_info->requester, tmp, DEFAULT_BUF_LENGTH / 2, 0);
-                        size_t num_uint8_read = n_read / sizeof( uint8_t);
-                        while((last_fill_point < DEFAULT_BUF_LENGTH / 2) && (iloc < num_uint8_read ))
-                        {
-                            test_mode_buf[last_fill_point] = tmp[iloc];
-                            last_fill_point++;
-                            iloc++;
-                             
-                        }
-
-                        if(last_fill_point == DEFAULT_BUF_LENGTH/2)
-                        {
-                            printf("All full: %i\n", last_fill_point);
-                            last_fill_point = 0;
-                            iloc = 0;
-                            break;
-                        }
+                    /* Non-float path: consume exactly DEFAULT_BUF_LENGTH bytes */
+                    if (!acc_consume_blocking(&byte_acc, test_mode_buf, DEFAULT_BUF_LENGTH, &parg.running)) {
+                        break;
                     }
-                    // Convert CS8 file to CU8 buffer
+                    n_read = DEFAULT_BUF_LENGTH;
+
                     if (demod->load_info.format == CS8_IQ) {
-                        for (unsigned long n = 0; n < n_read; n++) {
-                            test_mode_buf[n] = ((int8_t)test_mode_buf[n]) + 128;
+                        for (size_t i = 0; i < n_read; ++i) {
+                            test_mode_buf[i] = ((int8_t)test_mode_buf[i]) + 128;
                         }
                     }
                 }
-                if (n_read == 0) break;  // sdr_callback() will Segmentation Fault with len=0
+
+                if (n_read == 0) break; /* defensive */
+
                 demod->sample_file_pos = ((float)n_blocks * DEFAULT_BUF_LENGTH + n_read) / cfg->samp_rate / demod->sample_size;
-                n_blocks++; // this assumes n_read == DEFAULT_BUF_LENGTH
-                //printf("Callback\n");
+                n_blocks++;
+                print_logf(LOG_DEBUG, "Input", "Block %d: bytes_in=%lu samples_out=%lu cfg->samp_rate=%u",
+                           n_blocks, (unsigned long)n_read, (unsigned long)(n_read / demod->sample_size), cfg->samp_rate);
+
                 sdr_callback(test_mode_buf, n_read, cfg);
+
             } while (n_read != 0 && !cfg->exit_async);
 
-            // Call a last time with cleared samples to ensure EOP detection
-            if (demod->sample_size == 2) { // CU8
-                memset(test_mode_buf, 128, DEFAULT_BUF_LENGTH); // 128 is 0 in unsigned data
-                // or is 127.5 a better 0 in cu8 data?
-                //for (unsigned long n = 0; n < DEFAULT_BUF_LENGTH/2; n++)
-                //    ((uint16_t *)test_mode_buf)[n] = 0x807f;
-            }
-            else { // CF32, CS16
-                    memset(test_mode_buf, 0, DEFAULT_BUF_LENGTH);
+            /* Stop producer and join */
+            parg.running = 0;
+            /* Wake consumer/producer waiters */
+            pthread_cond_broadcast(&byte_acc.cond);
+            pthread_join(producer_tid, NULL);
+            acc_free(&byte_acc);
+
+            /* Final padding callback to flush end-of-stream, preserving previous semantics */
+            if (demod->sample_size == 2) {
+                memset(test_mode_buf, 128, DEFAULT_BUF_LENGTH);
+            } else {
+                memset(test_mode_buf, 0, DEFAULT_BUF_LENGTH);
             }
             demod->sample_file_pos = ((float)n_blocks + 1) * DEFAULT_BUF_LENGTH / cfg->samp_rate / demod->sample_size;
-            printf("n_blocks %i\n", n_blocks);
+            print_logf(LOG_NOTICE, "Input", "Test mode file issued %d packets", n_blocks);
             sdr_callback(test_mode_buf, DEFAULT_BUF_LENGTH, cfg);
-
-            //Always classify a signal at the end of the file
-            if (demod->am_analyze)
-                am_analyze_classify(demod->am_analyze);
-            if (cfg->verbosity >= LOG_NOTICE) {
-                print_logf(LOG_NOTICE, "Input", "Test mode file issued %d packets", n_blocks);
-            }
             reset_sdr_callback(cfg);
-
-            //if (in_file != stdin) {
-            //    fclose(in_file);
-            //}
         }
 
+        /* Cleanup */
         close_dumpers(cfg);
         free(test_mode_buf);
         free(test_mode_float_buf);
         r_free_cfg(cfg);
         exit(0);
     }
-
 }
