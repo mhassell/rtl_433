@@ -63,6 +63,7 @@
 #include "zmq_interface.h"
 #include "zmq.h"
 #include "czmq.h"
+#include "shm_ringbuf.h"
 
 #ifdef _WIN32
 #include <io.h>
@@ -2198,7 +2199,6 @@ int main(int argc, char **argv) {
 
     return r >= 0 ? r : -r;
 }
-
 
 void iq_proc(r_cfg_t *cfg, struct dm_state *demod)
 {
