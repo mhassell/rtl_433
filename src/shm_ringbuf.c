@@ -183,14 +183,15 @@ int shm_ringbuf_receive_fds(const char *sock_path, int *out_memfd, int *out_evtf
     *out_memfd = -1;
     *out_evtfd = -1;
 
-    int sock = socket(AF_UNIX, SOCK_SEQPACKET, 0);
+    /* Must match the socket type the producer (gqrx shm_ringbuf_send_fds)
+     * binds/listens with -- gqrx always uses SOCK_STREAM. Connecting with a
+     * mismatched type (e.g. SOCK_SEQPACKET) fails with EPROTOTYPE
+     * ("Protocol wrong type for socket"), since AF_UNIX enforces that both
+     * ends of a connection use the same socket type. */
+    int sock = socket(AF_UNIX, SOCK_STREAM, 0);
     if (sock < 0) {
-        /* SOCK_SEQPACKET unavailable (e.g. some older kernels); try SOCK_STREAM */
-        sock = socket(AF_UNIX, SOCK_STREAM, 0);
-        if (sock < 0) {
-            perror("shm_ringbuf: socket");
-            return -1;
-        }
+        perror("shm_ringbuf: socket");
+        return -1;
     }
 
     struct sockaddr_un addr;
