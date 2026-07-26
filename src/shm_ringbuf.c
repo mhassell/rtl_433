@@ -119,7 +119,7 @@ int shm_ringbuf_open(int memfd, int evtfd, shm_ringbuf_t *out_ctx)
     /* Determine memfd size */
     off_t size = lseek(memfd, 0, SEEK_END);
     if (size <= (off_t)sizeof(shm_ringbuf_header_t)) {
-        fprintf(stderr, "shm_ringbuf: memfd too small (%lld bytes)\n", (long long)size);
+        fprintf(stderr, "shm_ringbuf: memfd too small (%" PRId64 " bytes)\n", (int64_t)size);
         errno = EINVAL;
         return -1;
     }
@@ -142,7 +142,8 @@ int shm_ringbuf_open(int memfd, int evtfd, shm_ringbuf_t *out_ctx)
         return -1;
     }
     if (hdr->version != SHM_RINGBUF_VERSION) {
-        fprintf(stderr, "shm_ringbuf: version mismatch: got %u, expected %u\n",
+        fprintf(stderr, "shm_ringbuf: version mismatch: got %u, expected %u "
+                "(ensure both gqrx and rtl_433 use the same protocol version)\n",
                 hdr->version, SHM_RINGBUF_VERSION);
         munmap(region, (size_t)size);
         errno = EINVAL;
@@ -152,7 +153,8 @@ int shm_ringbuf_open(int memfd, int evtfd, shm_ringbuf_t *out_ctx)
     uint64_t bs = hdr->bufsize;
     if (bs == 0 || (bs & (bs - 1)) != 0 ||
         (size_t)size < sizeof(shm_ringbuf_header_t) + (size_t)bs) {
-        fprintf(stderr, "shm_ringbuf: invalid bufsize %" PRIu64 "\n", bs);
+        fprintf(stderr, "shm_ringbuf: invalid bufsize %" PRIu64
+                " (must be a power of two and fit within the memfd region)\n", bs);
         munmap(region, (size_t)size);
         errno = EINVAL;
         return -1;
@@ -181,6 +183,7 @@ int shm_ringbuf_receive_fds(const char *sock_path, int *out_memfd, int *out_evtf
     int sock = socket(AF_UNIX, SOCK_SEQPACKET, 0);
     if (sock < 0) {
         /* Fall back to SOCK_STREAM if SEQPACKET is not supported */
+        fprintf(stderr, "shm_ringbuf: SOCK_SEQPACKET unavailable, falling back to SOCK_STREAM\n");
         sock = socket(AF_UNIX, SOCK_STREAM, 0);
         if (sock < 0) {
             perror("shm_ringbuf: socket");
@@ -230,6 +233,22 @@ int shm_ringbuf_receive_fds(const char *sock_path, int *out_memfd, int *out_evtf
     struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
     if (!cmsg || cmsg->cmsg_level != SOL_SOCKET || cmsg->cmsg_type != SCM_RIGHTS) {
         fprintf(stderr, "shm_ringbuf: expected SCM_RIGHTS control message\n");
+        errno = EINVAL;
+        return -1;
+    }
+
+    /* Verify exactly 2 file descriptors were received */
+    size_t expected_len = CMSG_LEN(2 * sizeof(int));
+    if (cmsg->cmsg_len != expected_len) {
+        fprintf(stderr, "shm_ringbuf: SCM_RIGHTS payload wrong size "
+                "(got %zu bytes, expected %zu — need exactly 2 fds)\n",
+                (size_t)cmsg->cmsg_len, expected_len);
+        /* Close any extra fds that may have been received to avoid leaks */
+        if (cmsg->cmsg_len >= CMSG_LEN(sizeof(int))) {
+            int tmp;
+            memcpy(&tmp, CMSG_DATA(cmsg), sizeof(int));
+            close(tmp);
+        }
         errno = EINVAL;
         return -1;
     }

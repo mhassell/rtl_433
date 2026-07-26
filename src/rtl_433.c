@@ -1808,7 +1808,7 @@ static shm_ringbuf_t *start_shm(r_cfg_t *cfg)
             return NULL;
         }
         long efd = strtol(end + 1, &end, 10);
-        if (!end || (*end != '\0' && *end != '\n') || efd < 0) {
+        if (!end || *end != '\0' || efd < 0) {
             print_logf(LOG_ERROR, "SHM", "Invalid fd spec (expected fd:<memfd>:<evtfd>): %s", spec);
             return NULL;
         }
@@ -1843,6 +1843,8 @@ static shm_ringbuf_t *start_shm(r_cfg_t *cfg)
     if (shm_ringbuf_open(memfd, evtfd, shm) < 0) {
         print_logf(LOG_ERROR, "SHM", "shm_ringbuf_open failed: %s", strerror(errno));
         free(shm);
+        /* shm_ringbuf_open failed before taking ownership of the fds
+         * (it only stores them on success), so close them here. */
         close(memfd);
         close(evtfd);
         return NULL;
@@ -2024,8 +2026,6 @@ int main(int argc, char **argv) {
     if (cfg->frequencies > 1 && cfg->hop_times == 0) {
         cfg->hop_time[cfg->hop_times++] = DEFAULT_HOP_TIME;
     }
-    // save sample rate, this should be a hop config too
-    uint32_t sample_rate_0 = cfg->samp_rate;
 
     // add all remaining positional arguments as input files
     while (argc > optind) {

@@ -50,6 +50,10 @@ typedef struct {
     uint32_t version;       /* format version (SHM_RINGBUF_VERSION) */
     volatile uint64_t head; /* producer write index (monotonically increasing) */
     volatile uint64_t tail; /* consumer read index (monotonically increasing) */
+    /* Note: head/tail are accessed via __atomic_load_n/__atomic_store_n with acquire/release
+     * ordering (see shm_ringbuf.c).  The 'volatile' qualifier is kept as a secondary hint
+     * to the compiler that these locations are modified by an external process sharing the
+     * same mapped memory, preventing unintended load/store optimisation. */
     uint64_t bufsize;       /* ring buffer capacity in bytes (power of two) */
     uint64_t sample_rate;   /* sample rate in Hz (0 = unspecified) */
     uint64_t sample_size;   /* bytes per IQ sample pair (2=CU8, 4=CS16) */
