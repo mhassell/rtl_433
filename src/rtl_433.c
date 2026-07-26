@@ -24,6 +24,7 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <inttypes.h>
+#include <limits.h>
 #include <stdbool.h>
 #include <string.h>
 #include <errno.h>
@@ -1803,12 +1804,12 @@ static shm_ringbuf_t *start_shm(r_cfg_t *cfg)
         const char *p = spec + 3;
         char *end = NULL;
         long mfd = strtol(p, &end, 10);
-        if (!end || *end != ':' || mfd < 0) {
+        if (!end || *end != ':' || mfd < 0 || mfd > INT_MAX) {
             print_logf(LOG_ERROR, "SHM", "Invalid fd spec (expected fd:<memfd>:<evtfd>): %s", spec);
             return NULL;
         }
         long efd = strtol(end + 1, &end, 10);
-        if (!end || *end != '\0' || efd < 0) {
+        if (!end || *end != '\0' || efd < 0 || efd > INT_MAX) {
             print_logf(LOG_ERROR, "SHM", "Invalid fd spec (expected fd:<memfd>:<evtfd>): %s", spec);
             return NULL;
         }
@@ -2408,11 +2409,11 @@ void iq_proc(r_cfg_t *cfg, struct dm_state *demod)
         shm_ringbuf_close(shm);
         free(shm);
 
-        /* Final flush callback */
+        /* Final flush callback: pad with DC-centre value to flush decoder state */
         if (demod->sample_size == 2)
-            memset(shm_buf, 128, DEFAULT_BUF_LENGTH);
+            memset(shm_buf, 128, DEFAULT_BUF_LENGTH); /* CU8 DC centre: (0+255)/2 = 127.5 → 128 */
         else
-            memset(shm_buf, 0, DEFAULT_BUF_LENGTH);
+            memset(shm_buf, 0, DEFAULT_BUF_LENGTH); /* CS16: 0 is DC centre */
         sdr_callback(shm_buf, DEFAULT_BUF_LENGTH, cfg);
         reset_sdr_callback(cfg);
 

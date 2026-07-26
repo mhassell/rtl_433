@@ -111,7 +111,7 @@ Q_out = clamp(Q_float * 127.5 + 127.5, 0, 255)
 
 where `I_float` and `Q_float` are normalised IQ values in the range **[-1.0, +1.0]**
 (as produced by GNU Radio's complex float output).  The conversion maps -1.0 → 0,
-0.0 → 127 (DC centre), +1.0 → 255.
+0.0 → 127.5 → stored as **128** (integer truncation), +1.0 → 255.
 
 Each sample pair is 2 bytes: `[I₀ Q₀ I₁ Q₁ …]`.
 

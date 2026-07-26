@@ -160,6 +160,9 @@ int shm_ringbuf_open(int memfd, int evtfd, shm_ringbuf_t *out_ctx)
         return -1;
     }
 
+    /* All validation passed — store the fds in the context (ownership transfers to caller
+     * of shm_ringbuf_close).  Note: fds are NOT stored before this point, so on any
+     * failure above the caller retains ownership and must close them. */
     out_ctx->fd          = memfd;
     out_ctx->evtfd       = evtfd;
     out_ctx->region      = region;
@@ -182,8 +185,7 @@ int shm_ringbuf_receive_fds(const char *sock_path, int *out_memfd, int *out_evtf
 
     int sock = socket(AF_UNIX, SOCK_SEQPACKET, 0);
     if (sock < 0) {
-        /* Fall back to SOCK_STREAM if SEQPACKET is not supported */
-        fprintf(stderr, "shm_ringbuf: SOCK_SEQPACKET unavailable, falling back to SOCK_STREAM\n");
+        /* SOCK_SEQPACKET unavailable (e.g. some older kernels); try SOCK_STREAM */
         sock = socket(AF_UNIX, SOCK_STREAM, 0);
         if (sock < 0) {
             perror("shm_ringbuf: socket");
@@ -195,6 +197,7 @@ int shm_ringbuf_receive_fds(const char *sock_path, int *out_memfd, int *out_evtf
     memset(&addr, 0, sizeof(addr));
     addr.sun_family = AF_UNIX;
     strncpy(addr.sun_path, sock_path, sizeof(addr.sun_path) - 1);
+    addr.sun_path[sizeof(addr.sun_path) - 1] = '\0'; /* ensure null termination */
 
     if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
         fprintf(stderr, "shm_ringbuf: connect(%s): %s\n", sock_path, strerror(errno));
@@ -243,10 +246,11 @@ int shm_ringbuf_receive_fds(const char *sock_path, int *out_memfd, int *out_evtf
         fprintf(stderr, "shm_ringbuf: SCM_RIGHTS payload wrong size "
                 "(got %zu bytes, expected %zu — need exactly 2 fds)\n",
                 (size_t)cmsg->cmsg_len, expected_len);
-        /* Close any extra fds that may have been received to avoid leaks */
-        if (cmsg->cmsg_len >= CMSG_LEN(sizeof(int))) {
+        /* Close all fds that were actually received to prevent leaks */
+        size_t n_received = (cmsg->cmsg_len - CMSG_LEN(0)) / sizeof(int);
+        for (size_t i = 0; i < n_received; ++i) {
             int tmp;
-            memcpy(&tmp, CMSG_DATA(cmsg), sizeof(int));
+            memcpy(&tmp, (char *)CMSG_DATA(cmsg) + i * sizeof(int), sizeof(int));
             close(tmp);
         }
         errno = EINVAL;
