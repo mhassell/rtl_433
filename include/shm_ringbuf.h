@@ -30,17 +30,23 @@ extern "C" {
 
 /* Ring buffer header (at offset 0 in the shared region).
  *
- * Field layout (all fixed-width):
- *   magic       - 4 bytes  (SHM_RINGBUF_MAGIC = 0x52494E47)
- *   version     - 4 bytes  (SHM_RINGBUF_VERSION = 1)
- *   head        - 8 bytes  (producer write index, monotonically increasing)
- *   tail        - 8 bytes  (consumer read index, monotonically increasing)
- *   bufsize     - 8 bytes  (ring buffer capacity, must be a power of two)
- *   sample_rate - 8 bytes  (sample rate in Hz, 0 if unknown)
- *   sample_size - 8 bytes  (bytes per IQ sample pair: 2=CU8, 4=CS16)
- *   reserved    - 48 bytes (zero-filled, for future use)
+ * Field layout (all fixed-width) -- this MUST byte-for-byte match the
+ * producer-side struct in gqrx's include/shm_ringbuf.h (feature/shm-ringbuf-namedmem):
+ *   magic       - 4 bytes  (SHM_RINGBUF_MAGIC = 0x52494E47), offset  0
+ *   version     - 4 bytes  (SHM_RINGBUF_VERSION = 1),        offset  4
+ *   head        - 8 bytes  (producer write index, monotonically increasing), offset  8
+ *   tail        - 8 bytes  (consumer read index, monotonically increasing),  offset 16
+ *   bufsize     - 8 bytes  (ring buffer capacity, must be a power of two),   offset 24
+ *   sample_rate - 4 bytes  (sample rate in Hz, 0 if unknown),                offset 32
+ *   sample_size - 4 bytes  (bytes per IQ sample pair: 2=CU8, 4=CS16),        offset 36
  *
- * Total: 96 bytes, 8-byte aligned.
+ * Total: 40 bytes, 8-byte aligned.
+ *
+ * NOTE: sample_rate/sample_size are uint32_t (not uint64_t) and there is no
+ * trailing reserved padding -- both are required to match gqrx's producer
+ * layout exactly, otherwise shm_ringbuf_open()'s bufsize/region-size sanity
+ * check will fail (sizeof(shm_ringbuf_header_t) would disagree between the
+ * two sides, causing the consumer to misinterpret where ring data begins).
  *
  * head and tail are accessed via __atomic_load_n / __atomic_store_n with
  * acquire/release ordering for correct lock-free SPSC operation.
@@ -55,9 +61,8 @@ typedef struct {
      * to the compiler that these locations are modified by an external process sharing the
      * same mapped memory, preventing unintended load/store optimisation. */
     uint64_t bufsize;       /* ring buffer capacity in bytes (power of two) */
-    uint64_t sample_rate;   /* sample rate in Hz (0 = unspecified) */
-    uint64_t sample_size;   /* bytes per IQ sample pair (2=CU8, 4=CS16) */
-    uint64_t reserved[6];   /* zero-filled, reserved for future use */
+    uint32_t sample_rate;   /* sample rate in Hz (0 = unspecified) */
+    uint32_t sample_size;   /* bytes per IQ sample pair (2=CU8, 4=CS16) */
 } shm_ringbuf_header_t;
 
 /* Shared ring buffer context (consumer-side state, not shared) */
