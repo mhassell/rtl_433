@@ -136,6 +136,8 @@ typedef struct r_cfg {
     zmq_config *zmq_info;        ///< info for a zmq connection
     bool use_zmq;
     bool zmq_enabled;       ///< did we set up zmq socket yet?
+    bool use_shm;           ///< use shared-memory ring buffer input
+    char *shm_spec;         ///< SHM input spec: "fd:<memfd>:<evtfd>" or "sock:<path>"
 } r_cfg_t;
 
 #endif /* INCLUDE_RTL_433_H_ */

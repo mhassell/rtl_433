@@ -23,6 +23,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <inttypes.h>
 #include <stdbool.h>
 #include <string.h>
 #include <errno.h>
@@ -120,6 +121,7 @@ typedef struct {
     struct dm_state *demod;
     acc_t *acc;            /* accumulator to append into */
     int running;           /* set to 0 to stop */
+    shm_ringbuf_t *shm_ctx; /* non-NULL when reading from SHM ring buffer */
 } producer_args_t;
 
 
@@ -305,6 +307,9 @@ static void usage(int exit_code)
             "  [-r <filename> | help] Read data from input file instead of a receiver\n"
             "  [-w <filename> | help] Save data stream to output file (a '-' dumps samples to stdout)\n"
             "  [-W <filename> | help] Save data stream to output file, overwrite existing file\n"
+            "  [-J fd:<memfd_num>:<evtfd_num>] Read IQ from shared-memory ring buffer via inherited fds\n"
+            "  [-J sock:<unix_socket_path>] Read IQ from shared-memory ring buffer, receive fds via SCM_RIGHTS\n"
+            "\tSee docs/shm_iq_input.md for details on the shared-memory IPC transport.\n"
             "\t\t= Data output options =\n"
             "  [-F log | kv | json | csv | mqtt | influx | syslog | trigger | rtl_tcp | http | null | help] Produce decoded output in given format.\n"
             "       Append output to file with :<filename> (e.g. -F csv:log.csv), defaults to stdout.\n"
@@ -533,7 +538,25 @@ static void *producer_thread_fn(void *vargs)
     acc_t *acc = parg->acc;
     uint8_t readbuf[PRODUCER_READ_CHUNK];
 
-    if (cfg->use_zmq && cfg->zmq_info && cfg->zmq_info->requester) {
+    if (parg->shm_ctx) {
+        /* Shared-memory ring buffer reader */
+        shm_ringbuf_t *shm = parg->shm_ctx;
+        while (parg->running && !cfg->exit_async) {
+            ssize_t n = shm_ringbuf_read(shm, readbuf, sizeof(readbuf), 500 /* ms */);
+            if (n > 0) {
+                int a_rc = acc_append(acc, readbuf, (size_t)n, DEFAULT_BUF_LENGTH);
+                if (a_rc == -2) {
+                    print_logf(LOG_ERROR, "SHM", "Accumulator max cap reached; dropping %zd bytes", n);
+                } else if (a_rc == -1) {
+                    print_log(LOG_ERROR, "SHM", "Accumulator realloc failed");
+                }
+            } else if (n < 0) {
+                print_logf(LOG_ERROR, "SHM", "shm_ringbuf_read error: %s", strerror(errno));
+                break;
+            }
+            /* n == 0: timeout, loop and check running flag */
+        }
+    } else if (cfg->use_zmq && cfg->zmq_info && cfg->zmq_info->requester) {
         /* read ZMQ messages (multipart supported by using RCVMORE loop) */
         while (parg->running && !cfg->exit_async) {
             zmq_msg_t msg;
@@ -1032,7 +1055,7 @@ static int hasopt(int test, int argc, char *argv[], char const *optstring)
 
 static void parse_conf_option(r_cfg_t *cfg, int opt, char *arg);
 
-#define OPTSTRING "hVvqD:c:x:z:p:a:AI:S:m:M:r:w:W:l:d:t:f:H:g:s:b:n:R:X:F:K:C:T:UGy:E:Y:Z:"
+#define OPTSTRING "hVvqD:c:x:z:p:a:AI:S:m:M:r:w:W:l:d:t:f:H:g:s:b:n:R:X:F:K:C:T:UGy:E:Y:Z:J:"
 
 // these should match the short options exactly
 static struct conf_keywords const conf_keywords[] = {
@@ -1072,6 +1095,7 @@ static struct conf_keywords const conf_keywords[] = {
         {"test_data", 'y'},
         {"stop_after_successful_events", 'E'},
         {"zmq_port", 'Z'},
+        {"shm_iq", 'J'},
         {NULL, 0}};
 
 static void parse_conf_text(r_cfg_t *cfg, char *conf)
@@ -1571,10 +1595,19 @@ static void parse_conf_option(r_cfg_t *cfg, int opt, char *arg)
         cfg->zmq_info = zmq_info;
         cfg->use_zmq = true;
         //cfg->dev_mode = DEVICE_MODE_MANUAL;
-       break; 
-    default:
-        usage(1);
+       break;
+    case 'J':
+        if (!arg || !*arg) {
+            fprintf(stderr, "Option -J / shm_iq requires an argument, e.g. fd:<memfd>:<evtfd> or sock:/path\n");
+            usage(1);
+        }
+        free(cfg->shm_spec);
+        cfg->shm_spec = strdup(arg);
+        cfg->use_shm  = true;
         break;
+    default:
+       usage(1);
+       break;
     }
 }
 
@@ -1741,6 +1774,94 @@ static int start_zmq(r_cfg_t *cfg)
 
   return rc;
 
+}
+
+/**
+ * Parse a --shm-iq spec and open the ring buffer.
+ *
+ * Supported spec formats:
+ *   fd:<memfd_num>:<evtfd_num>   - fds inherited from the producer process
+ *   sock:<unix_socket_path>      - receive fds via SCM_RIGHTS from the socket
+ *
+ * On success, sets cfg->demod->sample_size and cfg->samp_rate from the
+ * ring buffer header (if the header fields are non-zero).
+ *
+ * @return allocated shm_ringbuf_t on success, NULL on error.
+ */
+static shm_ringbuf_t *start_shm(r_cfg_t *cfg)
+{
+    const char *spec = cfg->shm_spec;
+    int memfd = -1, evtfd = -1;
+
+    if (!spec || !*spec) {
+        print_log(LOG_ERROR, "SHM", "No SHM spec provided");
+        return NULL;
+    }
+
+    if (strncmp(spec, "fd:", 3) == 0) {
+        /* Parse fd:<memfd>:<evtfd> */
+        const char *p = spec + 3;
+        char *end = NULL;
+        long mfd = strtol(p, &end, 10);
+        if (!end || *end != ':' || mfd < 0) {
+            print_logf(LOG_ERROR, "SHM", "Invalid fd spec (expected fd:<memfd>:<evtfd>): %s", spec);
+            return NULL;
+        }
+        long efd = strtol(end + 1, &end, 10);
+        if (!end || (*end != '\0' && *end != '\n') || efd < 0) {
+            print_logf(LOG_ERROR, "SHM", "Invalid fd spec (expected fd:<memfd>:<evtfd>): %s", spec);
+            return NULL;
+        }
+        memfd = (int)mfd;
+        evtfd = (int)efd;
+        print_logf(LOG_INFO, "SHM", "Using inherited fds: memfd=%d evtfd=%d", memfd, evtfd);
+
+    } else if (strncmp(spec, "sock:", 5) == 0) {
+        /* Receive fds via SCM_RIGHTS over a Unix-domain socket */
+        const char *sock_path = spec + 5;
+        print_logf(LOG_INFO, "SHM", "Receiving fds via SCM_RIGHTS from %s", sock_path);
+        if (shm_ringbuf_receive_fds(sock_path, &memfd, &evtfd) < 0) {
+            print_logf(LOG_ERROR, "SHM", "Failed to receive fds from %s: %s",
+                       sock_path, strerror(errno));
+            return NULL;
+        }
+        print_logf(LOG_INFO, "SHM", "Received fds: memfd=%d evtfd=%d", memfd, evtfd);
+
+    } else {
+        print_logf(LOG_ERROR, "SHM", "Unknown SHM spec format (expected fd:... or sock:...): %s", spec);
+        return NULL;
+    }
+
+    shm_ringbuf_t *shm = (shm_ringbuf_t *)malloc(sizeof(shm_ringbuf_t));
+    if (!shm) {
+        print_log(LOG_ERROR, "SHM", "Out of memory");
+        close(memfd);
+        close(evtfd);
+        return NULL;
+    }
+
+    if (shm_ringbuf_open(memfd, evtfd, shm) < 0) {
+        print_logf(LOG_ERROR, "SHM", "shm_ringbuf_open failed: %s", strerror(errno));
+        free(shm);
+        close(memfd);
+        close(evtfd);
+        return NULL;
+    }
+
+    /* Apply metadata from the ring buffer header */
+    if (shm->hdr->sample_rate > 0) {
+        cfg->samp_rate = (uint32_t)shm->hdr->sample_rate;
+        print_logf(LOG_NOTICE, "SHM", "Sample rate from header: %u Hz", cfg->samp_rate);
+    }
+    if (shm->hdr->sample_size > 0) {
+        cfg->demod->sample_size = (int)shm->hdr->sample_size;
+    } else {
+        cfg->demod->sample_size = 2; /* default: CU8 */
+    }
+    print_logf(LOG_NOTICE, "SHM", "Sample size: %d bytes/pair, bufsize: %" PRIu64 " bytes",
+               cfg->demod->sample_size, shm->hdr->bufsize);
+
+    return shm;
 }
 
 static int start_sdr(r_cfg_t *cfg)
@@ -2202,15 +2323,108 @@ int main(int argc, char **argv) {
 
 void iq_proc(r_cfg_t *cfg, struct dm_state *demod)
 {
-    uint32_t sample_rate_0 = cfg->samp_rate;
     zmq_config *zmq_info = cfg->zmq_info;
 
     /* Ensure ZMQ subsystem is started if configured (no-op if not used) */
     if (zmq_info)
         zmq_start(zmq_info);
 
+    /* Shared-memory ring buffer input: continuous streaming, similar to ZMQ path */
+    if (cfg->use_shm) {
+        shm_ringbuf_t *shm = start_shm(cfg);
+        if (!shm) {
+            print_log(LOG_ERROR, "SHM", "Failed to open SHM ring buffer; aborting.");
+            r_free_cfg(cfg);
+            exit(2);
+        }
+
+        unsigned char *shm_buf = malloc(DEFAULT_BUF_LENGTH);
+        if (!shm_buf)
+            FATAL_MALLOC("shm_buf");
+
+        if (cfg->duration > 0) {
+            time(&cfg->stop_time);
+            cfg->stop_time += cfg->duration;
+        }
+
+        acc_t byte_acc = {0};
+        if (acc_init(&byte_acc, DEFAULT_BUF_LENGTH) < 0) {
+            print_log(LOG_ERROR, "SHM", "Failed to initialize accumulator");
+            shm_ringbuf_close(shm);
+            free(shm);
+            free(shm_buf);
+            r_free_cfg(cfg);
+            exit(2);
+        }
+
+        producer_args_t parg = {0};
+        parg.cfg     = cfg;
+        parg.demod   = demod;
+        parg.acc     = &byte_acc;
+        parg.running = 1;
+        parg.shm_ctx = shm;
+
+        pthread_t producer_tid;
+        if (pthread_create(&producer_tid, NULL, producer_thread_fn, &parg) != 0) {
+            print_log(LOG_ERROR, "SHM", "Failed to start producer thread");
+            shm_ringbuf_close(shm);
+            free(shm);
+            acc_free(&byte_acc);
+            free(shm_buf);
+            r_free_cfg(cfg);
+            exit(2);
+        }
+
+        print_logf(LOG_NOTICE, "SHM", "Streaming CU8 IQ from shared-memory ring buffer (%s)", cfg->shm_spec);
+
+        int n_blocks = 0;
+        do {
+            unsigned long n_read = 0;
+
+            if (!acc_consume_blocking(&byte_acc, shm_buf, DEFAULT_BUF_LENGTH, &parg.running)) {
+                break;
+            }
+            n_read = DEFAULT_BUF_LENGTH;
+
+            demod->sample_file_pos = ((float)n_blocks * DEFAULT_BUF_LENGTH + n_read)
+                                     / (float)cfg->samp_rate / (float)demod->sample_size;
+            n_blocks++;
+            print_logf(LOG_DEBUG, "SHM", "Block %d: bytes=%lu samples=%lu rate=%u",
+                       n_blocks, n_read, (unsigned long)(n_read / demod->sample_size), cfg->samp_rate);
+
+            sdr_callback(shm_buf, (uint32_t)n_read, cfg);
+
+            if (cfg->duration > 0 && time(NULL) >= cfg->stop_time)
+                break;
+
+        } while (!cfg->exit_async);
+
+        /* Shutdown */
+        parg.running = 0;
+        pthread_cond_broadcast(&byte_acc.cond);
+        pthread_join(producer_tid, NULL);
+        acc_free(&byte_acc);
+
+        shm_ringbuf_close(shm);
+        free(shm);
+
+        /* Final flush callback */
+        if (demod->sample_size == 2)
+            memset(shm_buf, 128, DEFAULT_BUF_LENGTH);
+        else
+            memset(shm_buf, 0, DEFAULT_BUF_LENGTH);
+        sdr_callback(shm_buf, DEFAULT_BUF_LENGTH, cfg);
+        reset_sdr_callback(cfg);
+
+        close_dumpers(cfg);
+        free(shm_buf);
+        r_free_cfg(cfg);
+        exit(0);
+    }
+
     /* Special case for in files or zmq-fed test data */
     if (cfg->in_files.len) {
+        uint32_t sample_rate_0 = cfg->samp_rate;
         unsigned char *test_mode_buf = malloc(DEFAULT_BUF_LENGTH);
         if (!test_mode_buf)
             FATAL_MALLOC("test_mode_buf");
